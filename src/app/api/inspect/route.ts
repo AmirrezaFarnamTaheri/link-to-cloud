@@ -21,7 +21,7 @@ export async function POST(req: Request) {
 
   const session = await getSession();
   const github = session.github ? githubOwner(session.github) : null;
-  if (!github && !(session.google && (await getGoogleAuth()))) {
+  if (!github && !(session.google && (await getGoogleAuth())) && !session.onedrive && !session.dropbox) {
     return json({ ok: false, error: "Log in first" } satisfies InspectResult, 401);
   }
   if (!allow(`inspect:${clientIp(req)}`, 120, 60_000)) {

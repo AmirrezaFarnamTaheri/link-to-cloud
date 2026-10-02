@@ -5,6 +5,7 @@ import {
   GITHUB_MAX_BYTES,
   GITHUB_WARN_BYTES,
   type InspectResult,
+  type PluginTarget,
   type ProviderInfo,
   type SessionInfo,
   type TransferDone,
@@ -84,7 +85,7 @@ const PHASE_TEXT: Record<string, string> = {
   "creating-repo": "Creating repository…",
   "creating-folder": "Creating folder…",
   committing: "Committing to GitHub…",
-  uploading: "Uploading to Google Drive…",
+  uploading: "Uploading to destination…",
 };
 
 export function RelayApp() {
@@ -107,7 +108,7 @@ export function RelayApp() {
   const prefsLoaded = useRef(false);
 
   const { urls, ignored, omitted } = useMemo(() => parseSourceLinks(text), [text]);
-  const anyLogin = !!(s?.github || s?.google);
+  const anyLogin = (s?.connectedProviders.length ?? 0) > 0;
 
   /* ---- session ---- */
   const loadSession = useCallback(async () => {
@@ -145,6 +146,16 @@ export function RelayApp() {
         google_scope: "Google Drive permission was not granted — please allow file access.",
         google_token: "Google could not complete sign-in. Please try again.",
         google_profile: "Google account details could not be verified.",
+        onedrive_denied: "OneDrive sign-in was cancelled.",
+        onedrive_state: "OneDrive sign-in could not be verified. Please try again.",
+        onedrive_token: "OneDrive could not complete sign-in. Please try again.",
+        onedrive_profile: "OneDrive account details could not be verified.",
+        onedrive_not_configured: "OneDrive OAuth is not configured on this server.",
+        dropbox_denied: "Dropbox sign-in was cancelled.",
+        dropbox_state: "Dropbox sign-in could not be verified. Please try again.",
+        dropbox_token: "Dropbox could not complete sign-in. Please try again.",
+        dropbox_profile: "Dropbox account details could not be verified.",
+        dropbox_not_configured: "Dropbox OAuth is not configured on this server.",
       };
       setNotice(map[err] ?? `Sign-in problem: ${err.replace(/_/g, " ")}.`);
       window.history.replaceState(null, "", "/");
@@ -160,9 +171,9 @@ export function RelayApp() {
 
   useEffect(() => {
     if (!prefsLoaded.current) return;
-    const { target, repo, branch, path, ifExists, folderId, isPrivate } = dest;
+    const { target, repo, branch, path, ifExists, folderId, isPrivate, remotePath, pluginDestination } = dest;
     try {
-      localStorage.setItem(PREFS_KEY, JSON.stringify({ target, repo, branch, path, ifExists, folderId, isPrivate }));
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ target, repo, branch, path, ifExists, folderId, isPrivate, remotePath, pluginDestination }));
     } catch {
       // Preference persistence is optional (for example, in private browsing modes).
     }
@@ -203,20 +214,22 @@ export function RelayApp() {
   const infoFor = (u: string) => info[`${header}\u0000${u}`];
 
   /* ---- validation ---- */
-  const connected = dest.target === "github" ? !!s?.github : !!s?.google;
+  const connected = dest.target === "github" ? !!s?.github : dest.target === "drive" ? !!s?.google : dest.target === "onedrive" ? !!s?.onedrive : dest.target === "dropbox" ? !!s?.dropbox : true;
   const destOk =
     dest.target === "github"
       ? dest.repoMode === "new"
         ? REPO_NAME_RE.test(dest.newRepo)
         : !!dest.repo
-      : dest.folderMode === "new"
-        ? dest.newFolder.trim().length > 0
+      : dest.target === "drive"
+        ? dest.folderMode === "new"
+          ? dest.newFolder.trim().length > 0
+          : true
         : true;
   const tooBig = dest.target === "github" && urls.some((u) => {
     const i = infoFor(u);
     return i && i !== "loading" && i.ok && i.size != null && i.size > GITHUB_MAX_BYTES;
   });
-  const targetAvailable = providers.some((provider) => provider.id === dest.target);
+  const targetAvailable = providers.some((provider) => provider.id === (dest.target.startsWith("plugin:") ? dest.target.slice("plugin:".length) : dest.target));
   const canRun = targetAvailable && connected && destOk && urls.length > 0 && !running;
 
   /* ---- run ---- */
@@ -264,7 +277,7 @@ export function RelayApp() {
             ? { newRepo: { name: dest.newRepo, private: dest.isPrivate, description: dest.newRepoDesc || undefined } }
             : { repo: repoOverride ?? dest.repo }),
         };
-      } else {
+      } else if (dest.target === "drive") {
         payload = {
           ...base,
           target: "drive",
@@ -272,6 +285,12 @@ export function RelayApp() {
             ? { newFolder: dest.newFolder }
             : { folderId: folderOverride ?? (dest.folderId || undefined) }),
         };
+      } else if (dest.target === "onedrive") {
+        payload = { ...base, target: "onedrive", path: dest.remotePath || undefined };
+      } else if (dest.target === "dropbox") {
+        payload = { ...base, target: "dropbox", path: dest.remotePath || undefined };
+      } else {
+        payload = { ...base, target: dest.target as PluginTarget, destination: dest.pluginDestination };
       }
 
       let t0 = 0;

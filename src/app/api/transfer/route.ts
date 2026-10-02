@@ -32,7 +32,8 @@ export async function POST(req: Request) {
     return jsonError(error instanceof Error ? error.message : "Invalid transfer request", status);
   }
 
-  const provider = getProvider(request.target);
+  const providerId = request.target.startsWith("plugin:") ? request.target.slice("plugin:".length) : request.target;
+  const provider = getProvider(providerId);
   if (!provider) return jsonError("Unsupported destination", 400);
 
   let credentials: ProviderCredentials | null;

@@ -1,12 +1,12 @@
 # Link-to-Cloud
 
-A Next.js service that fetches a public HTTP(S) URL from the server and transfers the response into the signed-in user's GitHub repository or Google Drive. The browser sends transfer instructions and receives progress events; it does not receive the file body.
+A Next.js service that fetches a public HTTP(S) URL from the server and transfers the response into the signed-in user's GitHub repository, Google Drive, OneDrive, or Dropbox. The browser sends transfer instructions and receives progress events; it does not receive the file body.
 
 ## Data path and internet usage
 
 ```text
 Browser -- URL/options --> Link-to-Cloud server -- GET --> source host
-Browser <-- progress events -- Link-to-Cloud server -- upload --> GitHub or Google Drive
+Browser <-- progress events -- Link-to-Cloud server -- upload --> selected storage provider
 ```
 
 Where the server runs determines whose connection carries the file:
@@ -22,9 +22,11 @@ The app emits periodic progress events, so browser control traffic is small rela
 | Destination | Upload method | Resource / size behavior |
 | --- | --- | --- |
 | **Google Drive** | Resumable upload in chunks of up to 8 MiB; unknown source lengths are supported. Chunk requests use Drive's 256 KiB alignment rules and can query the resumable session after an interrupted request. | Backpressure is preserved: Relay reads another source chunk after Drive acknowledges the current one. No file is written to disk; application buffering is bounded to one upload chunk plus normal network/runtime buffers. Google and hosting limits still apply. |
-| **GitHub** | GitHub Contents API commit. | The Contents API requires the complete base64 file payload, so Relay buffers each file in server memory and creates an expanded JSON payload. The implementation rejects files over 100 MiB; GitHub warns for files above 50 MiB. Prefer Drive for large files and avoid concurrent large GitHub transfers. When `skip` finds an existing file, Relay cancels the source before reading its body; the known size is recorded if available, and no SHA-256 is produced for that skipped file. |
+| **OneDrive** | Microsoft Graph upload session in 10 MiB chunks (a 320 KiB multiple). | Graph's disk-free upload-session protocol requires a known source `Content-Length`; unknown-length sources are rejected rather than buffered or staged. The opaque upload URL is restricted to Microsoft OneDrive upload hosts, and no bearer token is sent to it. |
+| **Dropbox** | Dropbox upload session in 8 MiB chunks, then an atomic finish request. | Unknown source lengths are supported. Each upload has bounded chunk memory and a streaming SHA-256; Dropbox's `autorename` commit behavior keeps an existing destination file rather than overwriting it. |
+| **GitHub** | GitHub Contents API commit. | The Contents API requires the complete base64 file payload, so Relay buffers each file in server memory and creates an expanded JSON payload. The implementation rejects files over 100 MiB; GitHub warns for files above 50 MiB. Prefer a chunked provider for large files and avoid concurrent large GitHub transfers. When `skip` finds an existing file, Relay cancels the source before reading its body; the known size is recorded if available, and no SHA-256 is produced for that skipped file. |
 
-The server allows at most one active GitHub transfer and two active Drive transfers per Node process; excess requests receive `503` with `Retry-After`. These are per-process limits, so also set service concurrency and maximum instances when deploying multiple containers. The in-memory rate limiter is likewise per process and bounded to 5,000 recent keys. By default it uses the rightmost syntactically valid `X-Forwarded-For` address as a best-effort bucket. This is trustworthy only when your ingress controls or appends the header and direct access cannot bypass that ingress; depending on the proxy chain, the value may identify a shared proxy rather than an individual client. Optionally set `CLIENT_IP_HEADER` to a single-IP header that your trusted ingress overwrites, and block direct access that could spoof it. A configured but missing or invalid value, or a request without a valid default XFF value, maps to one `unknown` bucket. Neither source is an identity or authorization signal. Use an external rate-limit store for global quotas across instances. The 100 MiB GitHub limit reflects GitHub's regular repository file limit, not a generic transfer or browser request-body limit. See [GitHub's large-file documentation](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github) and [Google Drive's upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads).
+The server allows at most one active GitHub transfer and two active transfers for each built-in chunked provider (Google Drive, OneDrive, and Dropbox) per Node process; an operator-installed plugin defaults to one active transfer unless its adapter is extended with a coordinated limit. Excess requests receive `503` with `Retry-After`.  These are per-process limits, so also set service concurrency and maximum instances when deploying multiple containers. The in-memory rate limiter is likewise per process and bounded to 5,000 recent keys. By default it uses the rightmost syntactically valid `X-Forwarded-For` address as a best-effort bucket. This is trustworthy only when your ingress controls or appends the header and direct access cannot bypass that ingress; depending on the proxy chain, the value may identify a shared proxy rather than an individual client. Optionally set `CLIENT_IP_HEADER` to a single-IP header that your trusted ingress overwrites, and block direct access that could spoof it. A configured but missing or invalid value, or a request without a valid default XFF value, maps to one `unknown` bucket. Neither source is an identity or authorization signal. Use an external rate-limit store for global quotas across instances. The 100 MiB GitHub limit reflects GitHub's regular repository file limit, not a generic transfer or browser request-body limit. See [GitHub's large-file documentation](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github) and [Google Drive's upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads).
 
 ## Run locally
 
@@ -43,8 +45,10 @@ For OAuth, register these callback URLs for the origin where the app runs:
 
 - GitHub: `https://YOUR_HOST/api/auth/github/callback`
 - Google: `https://YOUR_HOST/api/auth/google/callback`
+- Microsoft Entra / OneDrive: `https://YOUR_HOST/api/auth/onedrive/callback`
+- Dropbox: `https://YOUR_HOST/api/auth/dropbox/callback`
 
-Use `http://localhost:3000` for local development. Google OAuth uses the narrow `drive.file` scope. The GitHub OAuth flow uses the existing `repo` scope; the app does not request the `workflow` scope.
+Use `http://localhost:3000` for local development. Google OAuth uses the narrow `drive.file` scope. OneDrive uses delegated `User.Read` and `Files.ReadWrite`; Dropbox requires `account_info.read`, `files.content.write`, and `files.metadata.read` in the app configuration. The GitHub OAuth flow uses the existing `repo` scope; the app does not request the `workflow` scope.
 
 ### Environment
 
@@ -54,6 +58,9 @@ Use `http://localhost:3000` for local development. Google OAuth uses the narrow 
 - `SESSION_SECRET` — unique random secret, at least 32 bytes in production. Generate one with `openssl rand -base64 48`. Production sessions do not fall back to OAuth client secrets or a development key.
 - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` — optional GitHub OAuth app credentials.
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — optional Google OAuth web client credentials.
+- `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET` — optional Microsoft Entra web-app credentials for the OneDrive OAuth flow.
+- `DROPBOX_CLIENT_ID`, `DROPBOX_CLIENT_SECRET` — optional scoped Dropbox OAuth app credentials.
+- `LINK_TO_CLOUD_PROVIDER_MODULES` — optional comma-separated installed CommonJS package names for **trusted operator-installed provider modules**. This is not a browser-uploaded or end-user plugin loader; the deployment operator must include every package in the image and owns its server-code privileges.
 
 The session is AES-GCM sealed in an `httpOnly`, `SameSite=Lax` cookie. State-changing JSON routes require same-origin requests and bounded request bodies. Production cookies are marked `Secure`; serve the app over HTTPS. Keep `.env.local` and all deployment secrets out of source control.
 
@@ -114,9 +121,15 @@ Railway, Render, Fly.io, and VPS/container hosts can also work when their ingres
 
 ## Provider adapters
 
-The server has a **compile-time** provider registry (`src/lib/providers/registry.ts`) with working GitHub and Google Drive adapters. It is an imported, application-owned adapter list, not a runtime-installable plugin system. `GET /api/providers` exposes public descriptors, and the destination selector uses that registry rather than maintaining a second list of labels. Provider-specific OAuth routes and destination forms remain explicit because authentication scopes, folder/repository semantics, and upload protocols differ.
+The server has built-in adapters for GitHub, Google Drive, OneDrive, and Dropbox in `src/lib/providers/registry.ts`. `GET /api/providers` exposes their public descriptors, and the destination selector uses that registry rather than maintaining a second list of labels. Provider-specific OAuth routes and destination forms remain explicit because authentication scopes, folder/repository semantics, and upload protocols differ.
 
-Adding a real destination requires a provider ID and request types, request validation, credential resolution, an account/OAuth flow where needed, destination UI, a complete upload adapter, and unit/integration tests. No OneDrive, Dropbox, S3, or Rclone adapter is registered or implied; choose and configure the first additional provider before implementing one. Rclone is not bundled: supporting it would require isolated credentials/configuration, restricted operations, subprocess lifecycle and cancellation controls, packaging, and backend tests. A command that first downloads a file to `/tmp` before invoking Rclone stages the complete file, so it is neither disk-free nor streaming.
+### Operator-installed provider modules
+
+A deployment operator can extend the registry with a **trusted Node.js provider module** by installing a CommonJS package in the deployed image and setting `LINK_TO_CLOUD_PROVIDER_MODULES` to its comma-separated package name(s). A module exports either `provider`, `providers`, or a default adapter implementing `StorageProvider` from `src/lib/providers/types.ts`. Plugins use a namespaced transfer target such as `plugin:acme-webdav`, receive a bounded `{ destination: ... }` object that their `validateDestination` method must validate, and can expose declarative text fields through `destinationFields` for the generic UI. See [`docs/provider-plugins.md`](docs/provider-plugins.md).
+
+This is deliberately an **operator-installed** plugin boundary, not a runtime marketplace or browser upload endpoint: allowing a signed-in user to choose a package or submit adapter code would be arbitrary code execution on the application server. A production plugin still needs a stable provider ID and request schema, strict validation, credential resolution, account/OAuth flow where needed, destination UI, a bounded upload adapter, cancellation behavior, and unit/integration tests. Its package and dependencies must be present in the container image before startup.
+
+Rclone is not bundled or spawned. Supporting it would require isolated credentials/configuration, restricted remotes and operations, subprocess lifecycle/cancellation controls, packaging, and backend tests. A command that first downloads a file to `/tmp` before invoking Rclone stages the complete file, so it is neither disk-free nor streaming.
 
 ## GitHub Actions relay and desktop installers
 
@@ -135,4 +148,4 @@ npm test
 npm run build
 ```
 
-The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, GitHub skip behavior and bounded buffering, Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, upload-session URL validation, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. The CI workflow runs the checks on pushes and pull requests and builds the production container image.
+The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, GitHub skip behavior and bounded buffering, Google Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, OneDrive trusted upload-session URLs/byte ranges and known-length requirement, Dropbox upload-session commits, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. The CI workflow runs the checks on pushes and pull requests and builds the production container image.

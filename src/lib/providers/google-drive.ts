@@ -3,8 +3,13 @@ import { HttpError, mimeOf } from "@/lib/net";
 import { googleOwner } from "@/lib/owners";
 import { withTimeout } from "@/lib/timeouts";
 import type { Session } from "@/lib/session";
+import type { DriveTransferRequest, TransferRequest } from "@/lib/types";
 import type { StorageProvider } from "./types";
 import { uploadResumableStream } from "./google-drive-upload";
+
+function isDriveRequest(request: TransferRequest): request is DriveTransferRequest {
+  return request.target === "drive" && !("destination" in request);
+}
 
 export const googleDriveProvider: StorageProvider = {
   id: "drive",
@@ -23,7 +28,7 @@ export const googleDriveProvider: StorageProvider = {
 
   async uploadFile(context, credentials) {
     const { request, source, name, size, emit, signal } = context;
-    if (request.target !== "drive") throw new HttpError("Google Drive received an incompatible transfer request", 400);
+    if (!isDriveRequest(request)) throw new HttpError("Google Drive received an incompatible transfer request", 400);
     if (!source.body) throw new HttpError("The source did not provide a response body", 502);
 
     const t0 = Date.now();

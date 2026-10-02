@@ -5,6 +5,8 @@ import { cookies } from "next/headers";
 export type Session = {
   github?: { token: string; login: string; id?: number; via: "oauth" | "token" };
   google?: { token: string; refresh?: string; email: string; sub?: string; expiresAt: number };
+  onedrive?: { token: string; refresh?: string; id: string; name: string; expiresAt: number };
+  dropbox?: { token: string; refresh?: string; accountId: string; name: string; expiresAt: number };
 };
 
 const COOKIE = "relay_session";
