@@ -1,4 +1,14 @@
-// Types shared between server routes and client components.
+// Wire types shared between server routes and client components.
+
+export type TransferTarget = "github" | "drive";
+
+export type ProviderInfo = {
+  id: TransferTarget;
+  displayName: string;
+  icon: "github" | "drive";
+  maxFileBytes: number | null;
+  uploadMode: "buffered" | "chunked-stream";
+};
 
 export type SessionInfo = {
   github: { login: string; via: "oauth" | "token" } | null;
@@ -32,26 +42,33 @@ export type TransferEvent =
   | ({ type: "done" } & TransferDone)
   | { type: "error"; error: string };
 
-export type TransferRequest = {
+export type TransferBase = {
   url: string;
-  target: "github" | "drive";
   filename?: string;
   header?: string;
-  // github
+};
+
+export type GitHubTransferRequest = TransferBase & {
+  target: "github";
   repo?: string;
   newRepo?: { name: string; private: boolean; description?: string };
   branch?: string;
   path?: string;
   message?: string;
   ifExists?: "overwrite" | "rename" | "skip";
-  // drive
+};
+
+export type DriveTransferRequest = TransferBase & {
+  target: "drive";
   folderId?: string;
   newFolder?: string;
 };
 
+export type TransferRequest = GitHubTransferRequest | DriveTransferRequest;
+
 export type HistoryItem = {
   id: string;
-  target: "github" | "drive";
+  target: TransferTarget;
   status: "success" | "skipped" | "failed" | "cancelled";
   fileName: string;
   sourceUrl: string;

@@ -9,11 +9,11 @@ export type Session = {
 const COOKIE = "relay_session";
 
 function key() {
-  const secret =
-    process.env.SESSION_SECRET ||
-    process.env.GITHUB_CLIENT_SECRET ||
-    process.env.GOOGLE_CLIENT_SECRET ||
-    "dev-only-insecure-secret-change-me";
+  const configured = process.env.SESSION_SECRET;
+  if (process.env.NODE_ENV === "production" && (!configured || Buffer.byteLength(configured) < 32)) {
+    throw new Error("SESSION_SECRET must be set to at least 32 bytes in production");
+  }
+  const secret = configured || "dev-only-insecure-secret-change-me";
   return crypto.createHash("sha256").update(secret).digest();
 }
 
@@ -40,7 +40,7 @@ const baseOpts = {
   httpOnly: true,
   sameSite: "lax" as const,
   path: "/",
-  secure: process.env.NODE_ENV === "production" && !!process.env.COOKIE_SECURE,
+  secure: process.env.NODE_ENV === "production",
 };
 
 export async function getSession(): Promise<Session> {

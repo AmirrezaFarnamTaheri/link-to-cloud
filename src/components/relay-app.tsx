@@ -5,6 +5,7 @@ import {
   GITHUB_MAX_BYTES,
   GITHUB_WARN_BYTES,
   type InspectResult,
+  type ProviderInfo,
   type SessionInfo,
   type TransferDone,
   type TransferEvent,
@@ -98,6 +99,8 @@ const PHASE_TEXT: Record<string, string> = {
 
 export function RelayApp() {
   const [s, setS] = useState<SessionInfo | null>(null);
+  const [providers, setProviders] = useState<ProviderInfo[]>([]);
+  const [providersLoading, setProvidersLoading] = useState(true);
   const [notice, setNotice] = useState("");
   const [text, setText] = useState("");
   const [filename, setFilename] = useState("");
@@ -126,6 +129,20 @@ export function RelayApp() {
     }
   }, []);
 
+  const loadProviders = useCallback(async () => {
+    try {
+      const r = await fetch("/api/providers", { cache: "no-store" });
+      if (!r.ok) throw new Error("Provider list unavailable");
+      const body = (await r.json()) as { providers?: ProviderInfo[] };
+      setProviders(Array.isArray(body.providers) ? body.providers : []);
+    } catch {
+      setProviders([]);
+      setNotice("Could not load the supported destinations.");
+    } finally {
+      setProvidersLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const err = new URLSearchParams(window.location.search).get("error");
     if (err) {
@@ -137,12 +154,13 @@ export function RelayApp() {
       window.history.replaceState(null, "", "/");
     }
     void loadSession();
+    void loadProviders();
     try {
       const p = JSON.parse(localStorage.getItem(PREFS_KEY) ?? "null") as Partial<Dest> & { filename?: never } | null;
       if (p) setDest((d) => ({ ...d, ...p, repoMode: "existing", folderMode: "existing", newRepo: "", newFolder: "" }));
     } catch {}
     prefsLoaded.current = true;
-  }, [loadSession]);
+  }, [loadProviders, loadSession]);
 
   useEffect(() => {
     if (!prefsLoaded.current) return;
@@ -198,7 +216,8 @@ export function RelayApp() {
     const i = infoFor(u);
     return i && i !== "loading" && i.ok && i.size != null && i.size > GITHUB_MAX_BYTES;
   });
-  const canRun = connected && destOk && urls.length > 0 && !running;
+  const targetAvailable = providers.some((provider) => provider.id === dest.target);
+  const canRun = targetAvailable && connected && destOk && urls.length > 0 && !running;
 
   /* ---- run ---- */
   const patch = useCallback((u: string, part: Partial<Run>) => setRuns((p) => {
@@ -227,22 +246,33 @@ export function RelayApp() {
         continue;
       }
       patch(u, { status: "running", phase: "connecting" });
-      const payload: TransferRequest = {
+      const base = {
         url: u,
-        target: dest.target,
         header: header || undefined,
         filename: list.length === 1 && filename.trim() ? filename.trim() : undefined,
       };
+      let payload: TransferRequest;
       if (dest.target === "github") {
-        payload.path = dest.path || undefined;
-        payload.branch = dest.branch || undefined;
-        payload.ifExists = dest.ifExists;
-        payload.message = dest.message || undefined;
-        if (dest.repoMode === "new" && !repoOverride) {
-          payload.newRepo = { name: dest.newRepo, private: dest.isPrivate, description: dest.newRepoDesc || undefined };
-        } else payload.repo = repoOverride ?? dest.repo;
-      } else if (dest.folderMode === "new" && !folderOverride) payload.newFolder = dest.newFolder;
-      else payload.folderId = folderOverride ?? (dest.folderId || undefined);
+        payload = {
+          ...base,
+          target: "github",
+          path: dest.path || undefined,
+          branch: dest.branch || undefined,
+          ifExists: dest.ifExists,
+          message: dest.message || undefined,
+          ...(dest.repoMode === "new" && !repoOverride
+            ? { newRepo: { name: dest.newRepo, private: dest.isPrivate, description: dest.newRepoDesc || undefined } }
+            : { repo: repoOverride ?? dest.repo }),
+        };
+      } else {
+        payload = {
+          ...base,
+          target: "drive",
+          ...(dest.folderMode === "new" && !folderOverride
+            ? { newFolder: dest.newFolder }
+            : { folderId: folderOverride ?? (dest.folderId || undefined) }),
+        };
+      }
 
       let t0 = 0;
       let finished = false;
@@ -314,7 +344,7 @@ export function RelayApp() {
   const failN = runList.filter((r) => r.status === "error").length;
   const allFinished = runList.length > 0 && !running;
 
-  const targetName = dest.target === "github" ? "GitHub" : "Google Drive";
+  const targetName = providers.find((provider) => provider.id === dest.target)?.displayName ?? "destination";
 
   return (
     <div className="space-y-6">
@@ -495,7 +525,7 @@ export function RelayApp() {
             <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold">
               <span className="grid size-6 place-items-center rounded-full bg-indigo-500/20 text-xs text-indigo-300">2</span> Destination
             </h2>
-            <Destination s={s} dest={dest} setDest={setDest} reloadKey={reloadKey} disabled={running} />
+            <Destination s={s} dest={dest} setDest={setDest} reloadKey={reloadKey} disabled={running} providers={providers} />
 
             <div className="mt-6 space-y-3">
               {tooBig && <p className="text-xs text-red-400">Some files exceed GitHub’s 100 MB limit and will fail. Remove them or switch to Google Drive.</p>}
@@ -506,9 +536,11 @@ export function RelayApp() {
               ) : (
                 <button className={cx(btnPrimary, "w-full")} disabled={!canRun} onClick={run}>
                   <IconCloudUp className="size-4" />
-                  {!connected
-                    ? `Connect ${targetName} first`
-                    : urls.length === 0
+                  {!targetAvailable
+                    ? providersLoading ? "Loading destinations…" : "Destination unavailable"
+                    : !connected
+                      ? `Connect ${targetName} first`
+                      : urls.length === 0
                       ? "Paste a link to begin"
                       : !destOk
                         ? "Complete the destination"
@@ -539,8 +571,9 @@ export function RelayApp() {
             <h3 className="flex items-center gap-2 text-sm font-semibold text-slate-200">
               <IconLink className="size-4" /> How it works
             </h3>
-            <p>Relay’s server fetches the link and pushes it to your destination. Nothing is saved to your device or to our disk.</p>
-            <p>Every file gets a SHA-256 checksum so you can verify integrity. Links to private/internal networks are blocked.</p>
+            <p>The browser sends the link and options, then receives progress updates; file bytes stay on the server side and are not downloaded by the browser.</p>
+            <p>If Relay runs on localhost, your computer is the server and its internet connection carries both the source download and destination upload. When hosted remotely, your device carries only the small control/progress traffic; the host’s network and bandwidth limits apply.</p>
+            <p>Drive uses 8 MiB resumable chunks without writing files to disk. GitHub’s Contents API requires a base64 payload and buffers files in server memory. Each completed transfer includes a SHA-256 checksum.</p>
           </div>
         </div>
       </div>

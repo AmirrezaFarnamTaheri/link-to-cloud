@@ -16,12 +16,11 @@ export default function HomePage() {
           <span className="bg-gradient-to-r from-indigo-300 to-cyan-300 bg-clip-text text-transparent">straight to the cloud.</span>
         </h1>
         <p className="mt-4 text-pretty text-base leading-relaxed text-slate-400">
-          Paste download links and Relay moves the files server-to-server into a GitHub repository or Google Drive — with live progress,
-          checksums, and nothing ever landing on your device.
+          Paste download links and Relay transfers files from the source to GitHub or Google Drive on the server, with live progress and checksums. Your browser never downloads the file contents; a localhost server uses your computer’s internet connection.
         </p>
       </header>
       <RelayApp />
-      <footer className="mt-12 text-center text-xs text-slate-600">Relay · tokens live in an encrypted httpOnly cookie · files are never stored on the server</footer>
+      <footer className="mt-12 text-center text-xs text-slate-600">Relay · account tokens use an encrypted httpOnly cookie · Drive uses bounded-memory chunks; GitHub buffers files in memory · no file is written to server disk</footer>
     </main>
   );
 }

@@ -2,7 +2,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 
 import { useEffect, useState } from "react";
-import type { DriveFolder, Repo, SessionInfo } from "@/lib/types";
+import type { DriveFolder, ProviderInfo, Repo, SessionInfo } from "@/lib/types";
 import { cx, field, IconDrive, IconGithub, IconChevron, label, Segmented, Toggle } from "./ui";
 
 export type Dest = {
@@ -45,12 +45,14 @@ export function Destination({
   setDest,
   reloadKey,
   disabled,
+  providers,
 }: {
   s: SessionInfo | null;
   dest: Dest;
   setDest: React.Dispatch<React.SetStateAction<Dest>>;
   reloadKey: number;
   disabled: boolean;
+  providers: ProviderInfo[];
 }) {
   const set = (p: Partial<Dest>) => setDest((d) => ({ ...d, ...p }));
   const [repos, setRepos] = useState<Repo[]>([]);
@@ -125,14 +127,29 @@ export function Destination({
 
   return (
     <fieldset disabled={disabled} className="space-y-4 disabled:opacity-60">
-      <Segmented
-        value={dest.target}
-        onChange={(target) => set({ target })}
-        options={[
-          { value: "github", label: (<><IconGithub className="size-4" /> GitHub repo {s?.github && <span className="size-1.5 rounded-full bg-emerald-400" />}</>) },
-          { value: "drive", label: (<><IconDrive className="size-4" /> Google Drive {s?.google && <span className="size-1.5 rounded-full bg-emerald-400" />}</>) },
-        ]}
-      />
+      {providers.length > 0 ? (
+        <Segmented
+          value={dest.target}
+          onChange={(target) => set({ target })}
+          options={providers.map((provider) => {
+            const connected = provider.id === "github" ? !!s?.github : !!s?.google;
+            const Icon = provider.icon === "github" ? IconGithub : IconDrive;
+            return {
+              value: provider.id,
+              label: (
+                <>
+                  <Icon className="size-4" /> {provider.displayName}{" "}
+                  {connected && <span className="size-1.5 rounded-full bg-emerald-400" />}
+                </>
+              ),
+            };
+          })}
+        />
+      ) : (
+        <p role="status" className="rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-xs text-amber-200">
+          No destinations are available. Reload the app after checking the server.
+        </p>
+      )}
 
       {dest.target === "github" ? (
         <div className="space-y-4">
@@ -238,7 +255,7 @@ export function Destination({
           {showAdv && (
             <input className={field} placeholder="Commit message (default: Add <file>)" value={dest.message} onChange={(e) => set({ message: e.target.value })} maxLength={200} />
           )}
-          <p className="text-[11px] text-slate-500">GitHub rejects files over 100 MB; files over 50 MB are discouraged. The file is held in server memory before committing.</p>
+          <p className="text-[11px] text-slate-500">GitHub rejects files over 100 MiB. Its Contents API requires a base64 JSON payload, so Relay buffers each file in server memory and uses extra memory while encoding; avoid large or concurrent GitHub transfers.</p>
         </div>
       ) : (
         <div className="space-y-4">
@@ -272,7 +289,7 @@ export function Destination({
               <input className={cx(field, "mt-1.5")} placeholder="Relay uploads" value={dest.newFolder} onChange={(e) => set({ newFolder: e.target.value })} />
             </div>
           )}
-          <p className="text-[11px] text-slate-500">When the source reports its size, files stream straight into Drive without being buffered on the server.</p>
+          <p className="text-[11px] text-slate-500">Uploads use Drive resumable chunks of up to 8 MiB, including sources with unknown size. Relay writes no file to disk and holds at most one application chunk per active Drive transfer; server and provider limits still apply.</p>
         </div>
       )}
     </fieldset>
