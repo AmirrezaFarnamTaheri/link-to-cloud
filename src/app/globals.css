@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+html {
+  background: #070a12;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(60rem 40rem at 8% -12%, rgba(99, 102, 241, 0.2), transparent 60%),
+    radial-gradient(50rem 36rem at 100% -4%, rgba(34, 211, 238, 0.13), transparent 55%),
+    #070a12;
+  background-attachment: fixed;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, "Helvetica Neue", sans-serif;
+}
+
+::selection {
+  background: rgba(99, 102, 241, 0.45);
+}
+
+@keyframes indeterminate {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(350%);
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes stripes {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 28px 0;
+  }
+}
+
+.animate-indeterminate {
+  animation: indeterminate 1.3s ease-in-out infinite;
+}
+
+.animate-fade-up {
+  animation: fade-up 0.35s ease both;
+}
+
+.progress-stripes {
+  background-image: linear-gradient(
+    115deg,
+    rgba(255, 255, 255, 0.18) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.18) 50%,
+    rgba(255, 255, 255, 0.18) 75%,
+    transparent 75%
+  );
+  background-size: 28px 28px;
+  animation: stripes 0.8s linear infinite;
+}
+
+select option {
+  background: #0b1020;
+  color: #e2e8f0;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.25) transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-indeterminate,
+  .animate-fade-up,
+  .progress-stripes {
+    animation: none;
+  }
+}
