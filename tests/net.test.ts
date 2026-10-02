@@ -86,3 +86,75 @@ test("source fetch pins its dispatcher and stays linked to transfer cancellation
   assert.equal(fetchSignal.aborted, true);
   await res.body?.cancel();
 });
+
+
+test("configured relay carries source requests without using the direct dispatcher", async () => {
+  const oldUrl = process.env.RELAY_URL;
+  const oldSecret = process.env.RELAY_SHARED_SECRET;
+  const oldFetch = globalThis.fetch;
+  const calls: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+  process.env.RELAY_URL = "https://relay.example/relay";
+  process.env.RELAY_SHARED_SECRET = "0123456789abcdef0123456789abcdef";
+  globalThis.fetch = (async (input, init) => {
+    calls.push({
+      url: String(input),
+      authorization: new Headers(init?.headers).get("authorization"),
+      body: JSON.parse(String(init?.body ?? "{}")),
+    });
+    return new Response("payload", {
+      headers: {
+        "content-type": "application/octet-stream",
+        "content-length": "7",
+        "x-link-to-cloud-final-url": encodeURIComponent("https://cdn.example/final.bin"),
+      },
+    });
+  }) as typeof fetch;
+
+  try {
+    const { res, finalUrl } = await safeFetch("https://source.example/file.bin", {
+      headers: { Authorization: "Bearer source-token" },
+    });
+    assert.equal(finalUrl.toString(), "https://cdn.example/final.bin");
+    assert.equal(await res.text(), "payload");
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "https://relay.example/relay");
+    assert.equal(calls[0].authorization, "Bearer 0123456789abcdef0123456789abcdef");
+    assert.deepEqual(calls[0].body, {
+      url: "https://source.example/file.bin",
+      method: "GET",
+      headers: { Authorization: "Bearer source-token" },
+    });
+  } finally {
+    globalThis.fetch = oldFetch;
+    if (oldUrl === undefined) delete process.env.RELAY_URL;
+    else process.env.RELAY_URL = oldUrl;
+    if (oldSecret === undefined) delete process.env.RELAY_SHARED_SECRET;
+    else process.env.RELAY_SHARED_SECRET = oldSecret;
+  }
+});
+
+test("relay configuration is fail-closed and can be bypassed by a trusted relay implementation", async () => {
+  const oldUrl = process.env.RELAY_URL;
+  const oldSecret = process.env.RELAY_SHARED_SECRET;
+  process.env.RELAY_URL = "https://relay.example/relay";
+  delete process.env.RELAY_SHARED_SECRET;
+
+  try {
+    await assert.rejects(
+      safeFetch("https://8.8.8.8/file.bin"),
+      /requires both RELAY_URL and RELAY_SHARED_SECRET/i,
+    );
+
+    await assert.doesNotReject(
+      safeFetch("https://8.8.8.8/file.bin", {
+        bypassRelay: true,
+        fetcher: async () => new Response("ok"),
+      }),
+    );
+  } finally {
+    if (oldUrl === undefined) delete process.env.RELAY_URL;
+    else process.env.RELAY_URL = oldUrl;
+    if (oldSecret === undefined) delete process.env.RELAY_SHARED_SECRET;
+    else process.env.RELAY_SHARED_SECRET = oldSecret;
+  }
+});

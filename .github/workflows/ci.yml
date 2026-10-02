@@ -26,6 +26,11 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
+      - name: Validate relay scripts
+        run: |
+          node --check relay/common.mjs
+          node --check relay/cloudflare/worker.mjs
+          node --check netlify/functions/relay.mjs
       - name: Audit dependencies
         run: npm audit
       - name: Production build

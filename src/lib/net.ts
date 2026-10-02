@@ -205,17 +205,130 @@ function responseWithCleanup(
  * Fetch with manually checked and pinned public addresses, SSRF-checked redirects, header and body-idle timeouts.
  * Custom headers are only sent to the original origin.
  */
+type SafeFetchOptions = {
+  headers?: Record<string, string>;
+  method?: "GET" | "HEAD";
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  bodyIdleTimeoutMs?: number;
+  fetcher?: typeof fetch;
+  /** Force a direct source connection even when an external relay is configured. */
+  bypassRelay?: boolean;
+};
+
+type RelaySettings = { url: URL; secret: string };
+
+function configuredRelay(): RelaySettings | null {
+  const rawUrl = process.env.RELAY_URL?.trim() ?? "";
+  const secret = process.env.RELAY_SHARED_SECRET ?? "";
+  if (!rawUrl && !secret) return null;
+  if (!rawUrl || !secret) {
+    throw new HttpError("Relay configuration requires both RELAY_URL and RELAY_SHARED_SECRET", 500);
+  }
+  if (secret.length < 32) throw new HttpError("RELAY_SHARED_SECRET must be at least 32 characters", 500);
+
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new HttpError("RELAY_URL is invalid", 500);
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  const localDevelopment =
+    process.env.NODE_ENV !== "production" &&
+    url.protocol === "http:" &&
+    (host === "localhost" || host === "127.0.0.1" || host === "::1");
+  if (url.username || url.password || (url.protocol !== "https:" && !localDevelopment)) {
+    throw new HttpError("RELAY_URL must be an HTTPS URL without embedded credentials", 500);
+  }
+  return { url, secret };
+}
+
+function relayFinalUrl(response: Response, fallback: string): URL {
+  const encoded = response.headers.get("x-link-to-cloud-final-url");
+  if (!encoded) return new URL(fallback);
+  try {
+    const url = new URL(decodeURIComponent(encoded));
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.username || url.password) throw new Error("invalid");
+    return url;
+  } catch {
+    throw new HttpError("Relay returned an invalid final source URL", 502);
+  }
+}
+
+async function safeFetchViaRelay(
+  link: string,
+  relay: RelaySettings,
+  opts: SafeFetchOptions,
+): Promise<{ res: Response; finalUrl: URL }> {
+  const normalized = normalizeUrl(link);
+  const headerTimeout = new AbortController();
+  const signal = opts.signal ? AbortSignal.any([headerTimeout.signal, opts.signal]) : headerTimeout.signal;
+  const timer = setTimeout(() => headerTimeout.abort(new Error("timeout")), opts.timeoutMs ?? 30_000);
+  let res: Response;
+  try {
+    res = await fetch(relay.url, {
+      method: "POST",
+      redirect: "error",
+      signal,
+      headers: {
+        Authorization: `Bearer ${relay.secret}`,
+        "Content-Type": "application/json",
+        Accept: "*/*",
+      },
+      body: JSON.stringify({
+        url: normalized,
+        method: opts.method ?? "GET",
+        headers: opts.headers ?? {},
+      }),
+    });
+  } catch (error) {
+    if (opts.signal?.aborted) throw error;
+    throw new HttpError(
+      headerTimeout.signal.aborted ? "The relay took too long to respond" : "Could not reach the configured relay",
+      502,
+    );
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.headers.get("x-link-to-cloud-relay-error") === "1") {
+    const body = (await res.json().catch(() => ({}))) as { error?: unknown };
+    const message = typeof body.error === "string" && body.error ? body.error.slice(0, 500) : `HTTP ${res.status}`;
+    throw new HttpError(`Relay: ${message}`, res.status === 413 ? 413 : 502);
+  }
+
+  const finalUrl = relayFinalUrl(res, normalized);
+  const rawLimit = res.headers.get("x-link-to-cloud-max-bytes");
+  const rawLength = res.headers.get("content-length");
+  if (rawLimit && /^\d+$/.test(rawLimit) && rawLength && /^\d+$/.test(rawLength)) {
+    const limit = Number(rawLimit);
+    const length = Number(rawLength);
+    if (Number.isSafeInteger(limit) && Number.isSafeInteger(length) && limit >= 0 && length > limit) {
+      await res.body?.cancel().catch(() => {});
+      throw new HttpError("Source exceeds this relay's response-size limit", 413);
+    }
+  }
+
+  if (!res.body) return { res, finalUrl };
+  const bodyIdleTimeoutMs = opts.bodyIdleTimeoutMs ?? 120_000;
+  if (!Number.isSafeInteger(bodyIdleTimeoutMs) || bodyIdleTimeoutMs < 1) {
+    await res.body.cancel().catch(() => {});
+    throw new Error("bodyIdleTimeoutMs must be a positive safe integer");
+  }
+  return {
+    res: responseWithCleanup(res, async () => {}, (error) => headerTimeout.abort(error), bodyIdleTimeoutMs),
+    finalUrl,
+  };
+}
+
 export async function safeFetch(
   link: string,
-  opts: {
-    headers?: Record<string, string>;
-    method?: "GET" | "HEAD";
-    signal?: AbortSignal;
-    timeoutMs?: number;
-    bodyIdleTimeoutMs?: number;
-    fetcher?: typeof fetch;
-  } = {},
+  opts: SafeFetchOptions = {},
 ): Promise<{ res: Response; finalUrl: URL }> {
+  const relay = !opts.fetcher && !opts.bypassRelay ? configuredRelay() : null;
+  if (relay) return safeFetchViaRelay(link, relay, opts);
+
   let u = new URL(normalizeUrl(link));
   const firstOrigin = u.origin;
   const fetcher = opts.fetcher ?? fetch;

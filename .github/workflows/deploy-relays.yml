@@ -1,0 +1,88 @@
+name: Deploy source relays
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Relay target to deploy
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - cloudflare
+          - netlify
+
+permissions:
+  contents: read
+
+jobs:
+  cloudflare:
+    if: ${{ inputs.target == 'both' || inputs.target == 'cloudflare' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate deployment secrets
+        env:
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          test "${#RELAY_SHARED_SECRET}" -ge 32
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+      - name: Deploy Cloudflare Worker relay
+        env:
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -eu
+          secret_file="$RUNNER_TEMP/link-to-cloud-relay.env"
+          trap 'rm -f "$secret_file"' EXIT
+          umask 077
+          printf 'RELAY_SHARED_SECRET=%s\n' "$RELAY_SHARED_SECRET" > "$secret_file"
+          npx --yes wrangler@4.146.0 deploy \
+            --config relay/cloudflare/wrangler.jsonc \
+            --secrets-file "$secret_file"
+
+  netlify:
+    if: ${{ inputs.target == 'both' || inputs.target == 'netlify' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Validate deployment secrets
+        env:
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          test "${#RELAY_SHARED_SECRET}" -ge 32
+          test -n "$NETLIFY_AUTH_TOKEN"
+          test -n "$NETLIFY_SITE_ID"
+      - name: Store Netlify relay secret
+        env:
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          npx --yes netlify-cli@27.10.2 env:set RELAY_SHARED_SECRET "$RELAY_SHARED_SECRET" \
+            --site "$NETLIFY_SITE_ID" --auth "$NETLIFY_AUTH_TOKEN" \
+            --scope functions --context production --secret
+      - name: Deploy Netlify relay
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}
+        run: |
+          npx --yes netlify-cli@27.10.2 deploy \
+            --prod --no-build \
+            --auth "$NETLIFY_AUTH_TOKEN" \
+            --site "$NETLIFY_SITE_ID" \
+            --dir relay/netlify/public \
+            --functions netlify/functions

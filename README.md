@@ -61,6 +61,7 @@ Use `http://localhost:3000` for local development. Google OAuth uses the narrow 
 - `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET` — optional Microsoft Entra web-app credentials for the OneDrive OAuth flow.
 - `DROPBOX_CLIENT_ID`, `DROPBOX_CLIENT_SECRET` — optional scoped Dropbox OAuth app credentials.
 - `LINK_TO_CLOUD_PROVIDER_MODULES` — optional comma-separated installed CommonJS package names for **trusted operator-installed provider modules**. This is not a browser-uploaded or end-user plugin loader; the deployment operator must include every package in the image and owns its server-code privileges.
+- `RELAY_URL`, `RELAY_SHARED_SECRET` — optional authenticated source-fetch relay. Configure both or neither. The app still owns destination credentials and uploads; only the source-download leg is delegated. Use HTTPS in production and a unique random secret of at least 32 characters.
 
 The session is AES-GCM sealed in an `httpOnly`, `SameSite=Lax` cookie. State-changing JSON routes require same-origin requests and bounded request bodies. Production cookies are marked `Secure`; serve the app over HTTPS. Keep `.env.local` and all deployment secrets out of source control.
 
@@ -131,13 +132,47 @@ This is deliberately an **operator-installed** plugin boundary, not a runtime ma
 
 Rclone is not bundled or spawned. Supporting it would require isolated credentials/configuration, restricted remotes and operations, subprocess lifecycle/cancellation controls, packaging, and backend tests. A command that first downloads a file to `/tmp` before invoking Rclone stages the complete file, so it is neither disk-free nor streaming.
 
-## GitHub Actions relay and desktop installers
+## External source relays
 
-The GitHub Actions relay described in the proposal is deliberately **not implemented**. The current OAuth scope is not broadened, no user-controlled workflow-dispatch endpoint is exposed, and no arbitrary file-transfer workflow is shipped or dispatched. The proposed shell-workflow pattern is unsafe as a relay: interpolating user input into shell source can permit command injection, workflow credentials can be exposed, and downloading a file to `/tmp` stages the complete payload instead of streaming it. Do not ship or dispatch that sample.
+The application can optionally delegate the **source-download leg** to an authenticated relay while keeping OAuth credentials, destination uploads, transfer history, and UI control in the main Next.js service. This is useful when the app host has restrictive egress, short source-fetch limits, or you want a separate network path.
 
-GitHub's current [Actions terms](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features) say GitHub-hosted runners must not be used for activity unrelated to production, testing, deployment, or publication of the associated software project. A general-purpose transfer relay is unrelated work and creates token/secret exposure and account-enforcement risks. Use a permitted long-running container/VPS or a purpose-built transfer service instead.
+The relay protocol is intentionally small:
 
-This repository is a web app, not an Electron/Tauri desktop app. It has no desktop runtime, installer configuration, local PostgreSQL bundle, or installer signing/release process. Therefore there is no tag-triggered installer workflow; running a wrapped local server would again route file traffic through the user's own internet connection. Add desktop packaging only as a separate product decision with a complete runtime and distribution design—the sample `electron-builder` invocation alone cannot produce valid installers here.
+- the app POSTs bounded JSON to `/relay` with the source URL, `GET`/`HEAD`, and the already-validated optional source header;
+- the relay requires `Authorization: Bearer <RELAY_SHARED_SECRET>`;
+- redirects are followed manually so source credentials are not forwarded across origins;
+- response bytes are streamed back to the app and are never staged on disk;
+- the relay returns the final source URL in `X-Link-To-Cloud-Final-Url`, which keeps filename inference and history behavior consistent.
+
+Set the same secret in the app and relay platform, then point `RELAY_URL` at the deployed HTTPS `/relay` endpoint. Direct source fetching remains the default when relay variables are unset.
+
+### Cloudflare Worker relay
+
+`relay/cloudflare/worker.mjs` is a streaming Worker implementation with `global_fetch_strictly_public` enabled in `relay/cloudflare/wrangler.jsonc`. It rejects literal IPs and local/private-style hostnames before fetches, uses manual redirects, and relies on Cloudflare's strict-public fetch mode to prevent requests to private IP space. Do not add VPC/private-network bindings to this relay.
+
+Deploy manually with Wrangler or use the `Deploy source relays` workflow. Store `RELAY_SHARED_SECRET` as a Worker secret, never as a plaintext `vars` value.
+
+### Netlify Function relay
+
+`netlify/functions/relay.mjs` reuses this repository's DNS-pinned `safeFetch` path with relay recursion explicitly disabled. That preserves the Node implementation's private/special-address rejection and DNS pinning.
+
+Netlify's streamed synchronous Function response is limited to 20 MB and has a short execution window, so this relay is intentionally a **small-file relay**. It rejects known source lengths above 20 MB and also advertises the limit to the main app. Use Cloudflare or a long-running container/VPS relay for larger source bodies.
+
+### GitHub Actions
+
+GitHub Actions is used to **deploy and verify** the relay implementations, not as a public HTTP byte proxy. GitHub's Actions terms prohibit using GitHub-hosted runners as a general CDN/serverless application or unrelated transfer service. The workflow is therefore operator-triggered and project-scoped: it deploys the Cloudflare and/or Netlify relay, validates required secrets, and never accepts end-user URLs as shell code or workflow inputs.
+
+Required repository secrets for `.github/workflows/deploy-relays.yml`:
+
+- `RELAY_SHARED_SECRET` — the same 32+ character random value configured in the main app;
+- Cloudflare: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`;
+- Netlify: `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID`.
+
+For Netlify, the workflow stores `RELAY_SHARED_SECRET` as a production Functions secret before deployment. Cloudflare uploads it alongside the Worker deployment using Wrangler's secrets file support.
+
+## Desktop installers
+
+This repository is a web app, not an Electron/Tauri desktop app. It has no desktop runtime, installer configuration, local PostgreSQL bundle, or installer signing/release process. Add desktop packaging only as a separate product decision with a complete runtime and distribution design.
 
 ## Validation
 
@@ -148,4 +183,4 @@ npm test
 npm run build
 ```
 
-The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, GitHub skip behavior and bounded buffering, Google Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, OneDrive trusted upload-session URLs/byte ranges and known-length requirement, Dropbox upload-session commits, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. The CI workflow runs the checks on pushes and pull requests and builds the production container image.
+The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, authenticated relay routing/fail-closed configuration, GitHub skip behavior and bounded buffering, Google Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, OneDrive trusted upload-session URLs/byte ranges and known-length requirement, Dropbox upload-session commits, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. CI also syntax-checks both relay implementations.
