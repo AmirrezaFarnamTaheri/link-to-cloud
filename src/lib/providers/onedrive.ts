@@ -77,7 +77,7 @@ async function uploadEmptyFile(
   accessToken: string,
   encodedPath: string,
   mime: string,
-  conflictBehavior: "replace" | "rename",
+  conflictBehavior: "fail" | "replace" | "rename",
   signal: AbortSignal,
 ): Promise<DriveItem> {
   const url = new URL(`${GRAPH}/me/drive/root:/${encodedPath}:/content`);
@@ -125,7 +125,7 @@ export const oneDriveProvider: StorageProvider = {
     const mime = mimeOf(source);
     const startedAt = Date.now();
     const ifExists = request.ifExists ?? "rename";
-    const conflictBehavior = ifExists === "overwrite" ? "replace" : "rename";
+    const conflictBehavior = ifExists === "skip" ? "fail" : ifExists === "overwrite" ? "replace" : "rename";
 
     if (ifExists === "skip") {
       const existing = await existingItem(credentials.accessToken, encoded, signal);

@@ -13,7 +13,10 @@ const API = "https://api.dropboxapi.com/2/files";
 const CONTENT_API = "https://content.dropboxapi.com/2/files";
 const CHUNK_SIZE = 8 * 1024 * 1024;
 
-type DropboxError = { error_summary?: unknown; error?: { ".tag"?: unknown; correct_offset?: unknown } };
+type DropboxError = {
+  error_summary?: unknown;
+  error?: { ".tag"?: unknown; path?: { ".tag"?: unknown }; correct_offset?: unknown };
+};
 
 type DropboxEntry = { id?: unknown; name?: unknown; path_display?: unknown };
 
@@ -25,10 +28,18 @@ function apiHeaders(accessToken: string, arg: unknown) {
   };
 }
 
+function errorTextFromBody(body: DropboxError, status: number): string {
+  const summary = typeof body.error_summary === "string" ? body.error_summary : "";
+  return summary ? summary.slice(0, 500) : `HTTP ${status}`;
+}
+
 async function errorText(response: Response): Promise<string> {
   const body = (await response.json().catch(() => ({}))) as DropboxError;
-  const summary = typeof body.error_summary === "string" ? body.error_summary : "";
-  return summary ? summary.slice(0, 500) : `HTTP ${response.status}`;
+  return errorTextFromBody(body, response.status);
+}
+
+function isPathNotFound(body: DropboxError): boolean {
+  return body.error?.[".tag"] === "path" && body.error.path?.[".tag"] === "not_found";
 }
 
 function checkedPath(folder: string | undefined, name: string): string {
@@ -59,8 +70,9 @@ async function existingEntry(accessToken: string, path: string, signal: AbortSig
   }).catch(() => null);
   if (!response) throw new HttpError("Dropbox could not check the destination: network error", 502);
   if (response.status === 409) {
-    await response.body?.cancel().catch(() => {});
-    return null;
+    const body = (await response.json().catch(() => ({}))) as DropboxError;
+    if (isPathNotFound(body)) return null;
+    throw new HttpError(`Dropbox could not check the destination: ${errorTextFromBody(body, response.status)}`, 502);
   }
   if (!response.ok) {
     const message = await errorText(response);
@@ -159,9 +171,9 @@ export const dropboxProvider: StorageProvider = {
           commit: {
             path,
             mode: ifExists === "overwrite" ? "overwrite" : "add",
-            autorename: ifExists !== "overwrite",
+            autorename: ifExists === "rename",
             mute: false,
-            strict_conflict: false,
+            strict_conflict: ifExists === "skip",
           },
         }),
         body: new Uint8Array(),

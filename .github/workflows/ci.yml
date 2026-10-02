@@ -30,7 +30,55 @@ jobs:
         run: |
           node --check relay/common.mjs
           node --check relay/cloudflare/worker.mjs
+          node --check relay/github/worker.mjs
           node --check netlify/functions/relay.mjs
+      - name: Validate Cloudflare relay bundle
+        run: |
+          set -eu
+          secret_file="$RUNNER_TEMP/link-to-cloud-relay-ci.env"
+          umask 077
+          printf 'RELAY_SHARED_SECRET=%s\n' 'ci-only-relay-secret-0123456789abcdef' > "$secret_file"
+          npx --yes wrangler@4.146.0 deploy \
+            --dry-run \
+            --config relay/cloudflare/wrangler.jsonc \
+            --outdir "$RUNNER_TEMP/wrangler-relay" \
+            --secrets-file "$secret_file"
+      - name: Build and probe GitHub relay container
+        run: |
+          set -eu
+          image=link-to-cloud-github-relay:ci
+          name=link-to-cloud-github-relay-ci
+          secret=ci-only-relay-secret-0123456789abcdef
+          docker build --file relay/github/Dockerfile --tag "$image" .
+          docker run --detach --rm \
+            --name "$name" \
+            --publish 127.0.0.1:18789:8789 \
+            --env RELAY_SHARED_SECRET="$secret" \
+            "$image"
+          trap 'docker rm --force "$name" >/dev/null 2>&1 || true' EXIT
+
+          i=0
+          until curl --fail --silent --show-error http://127.0.0.1:18789/relay >/dev/null; do
+            i=$((i + 1))
+            test "$i" -lt 20
+            sleep 1
+          done
+
+          unauthorized_status="$(curl --silent --output "$RUNNER_TEMP/github-relay-unauthorized.json" --write-out '%{http_code}' \
+            --request POST \
+            --header 'Content-Type: application/json' \
+            --data '{"url":"https://example.com/file.bin","method":"GET"}' \
+            http://127.0.0.1:18789/relay)"
+          test "$unauthorized_status" = "401"
+
+          private_status="$(curl --silent --output "$RUNNER_TEMP/github-relay-private.json" --write-out '%{http_code}' \
+            --request POST \
+            --header "Authorization: Bearer $secret" \
+            --header 'Content-Type: application/json' \
+            --data '{"url":"http://127.0.0.1:1/file.bin","method":"GET"}' \
+            http://127.0.0.1:18789/relay)"
+          test "$private_status" = "502"
+          grep -qi 'private\|non-public\|special-use' "$RUNNER_TEMP/github-relay-private.json"
       - name: Audit dependencies
         run: npm audit
       - name: Production build

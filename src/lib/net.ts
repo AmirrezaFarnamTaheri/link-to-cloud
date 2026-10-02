@@ -114,7 +114,7 @@ export function normalizeUrl(link: string): string {
   return u.toString();
 }
 
-const BLOCKED_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "upgrade", "te"]);
+const BLOCKED_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "upgrade", "te", "accept-encoding"]);
 
 /** Parse an optional "Name: value" line the user wants sent to the source server. */
 export function parseHeaderLine(line?: string): Record<string, string> {
@@ -295,7 +295,8 @@ async function safeFetchViaRelay(
   if (res.headers.get("x-link-to-cloud-relay-error") === "1") {
     const body = (await res.json().catch(() => ({}))) as { error?: unknown };
     const message = typeof body.error === "string" && body.error ? body.error.slice(0, 500) : `HTTP ${res.status}`;
-    throw new HttpError(`Relay: ${message}`, res.status === 413 ? 413 : 502);
+    const status = res.status === 413 || res.status === 422 ? res.status : 502;
+    throw new HttpError(`Relay: ${message}`, status);
   }
 
   const finalUrl = relayFinalUrl(res, normalized);

@@ -1,4 +1,4 @@
-import { safeFetch } from "../../src/lib/net.ts";
+import { knownSize, safeFetch } from "../../src/lib/net.ts";
 import {
   authenticateRelay,
   jsonError,
@@ -38,10 +38,14 @@ export default async function relay(request) {
       bodyIdleTimeoutMs: 50_000,
       bypassRelay: true,
     });
-    const rawLength = res.headers.get("content-length");
-    if (rawLength && /^\d+$/.test(rawLength) && Number(rawLength) > NETLIFY_STREAM_LIMIT_BYTES) {
+    const size = knownSize(res);
+    if (size !== null && size > NETLIFY_STREAM_LIMIT_BYTES) {
       await res.body?.cancel().catch(() => {});
       return jsonError("source is larger than Netlify's 20 MB streamed response limit", 413);
+    }
+    if (relayRequest.method === "GET" && size === null) {
+      await res.body?.cancel().catch(() => {});
+      return jsonError("Netlify relay requires a trustworthy Content-Length for file transfers", 422);
     }
     return relaySourceResponse(res, finalUrl, "netlify-function", NETLIFY_STREAM_LIMIT_BYTES);
   } catch (error) {

@@ -1,7 +1,7 @@
 const MAX_CONTROL_BYTES = 16 * 1024;
 const MAX_URL_CHARS = 8192;
 const MAX_HEADER_VALUE_CHARS = 4096;
-const BLOCKED_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "upgrade", "te"]);
+const BLOCKED_HEADERS = new Set(["host", "content-length", "connection", "transfer-encoding", "upgrade", "te", "accept-encoding"]);
 const RESERVED_EDGE_HOSTS = new Set([
   "localhost",
   "metadata.google.internal",
@@ -93,6 +93,45 @@ export function validateRelayTarget(value, { edge = false } = {}) {
   return url;
 }
 
+
+async function readBoundedBody(request, maxBytes, timeoutMs = 15_000) {
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks = [];
+  let total = 0;
+  let timer;
+  const timedOut = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error("relay request body timed out")), timeoutMs);
+  });
+
+  try {
+    for (;;) {
+      const { done, value } = await Promise.race([reader.read(), timedOut]);
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => {});
+        throw new Error("relay request body is too large");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    await reader.cancel(error).catch(() => {});
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
+
 export async function readRelayRequest(request, { edge = false } = {}) {
   const mediaType = request.headers.get("content-type")?.split(";", 1)[0].trim().toLowerCase();
   if (mediaType !== "application/json") throw new Error("Content-Type must be application/json");
@@ -102,8 +141,7 @@ export async function readRelayRequest(request, { edge = false } = {}) {
       throw new Error("relay request body is too large");
     }
   }
-  const bytes = new Uint8Array(await request.arrayBuffer());
-  if (bytes.byteLength > MAX_CONTROL_BYTES) throw new Error("relay request body is too large");
+  const bytes = await readBoundedBody(request, MAX_CONTROL_BYTES);
   let body;
   try {
     body = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
@@ -123,6 +161,11 @@ export async function readRelayRequest(request, { edge = false } = {}) {
 }
 
 function filteredSourceHeaders(source, finalUrl, platform, maxBytes) {
+  const encoding = (source.headers.get("content-encoding") ?? "").toLowerCase();
+  if (source.body && encoding && encoding !== "identity") {
+    void source.body.cancel().catch(() => {});
+    throw new Error("relay source used an unsupported content encoding");
+  }
   const headers = new Headers(relayHeaders({
     "X-Link-To-Cloud-Relay": platform,
     "X-Link-To-Cloud-Final-Url": encodeURIComponent(finalUrl.toString()),
@@ -131,7 +174,6 @@ function filteredSourceHeaders(source, finalUrl, platform, maxBytes) {
     const value = source.headers.get(name);
     if (value) headers.set(name, value);
   }
-  const encoding = (source.headers.get("content-encoding") ?? "").toLowerCase();
   const length = source.headers.get("content-length");
   if ((!encoding || encoding === "identity") && length && /^\d+$/.test(length)) {
     headers.set("content-length", length);

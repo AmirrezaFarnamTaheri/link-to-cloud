@@ -6,19 +6,20 @@ on:
       target:
         description: Relay target to deploy
         required: true
-        default: both
+        default: all
         type: choice
         options:
-          - both
+          - all
           - cloudflare
           - netlify
+          - github
 
 permissions:
   contents: read
 
 jobs:
   cloudflare:
-    if: ${{ inputs.target == 'both' || inputs.target == 'cloudflare' }}
+    if: ${{ inputs.target == 'all' || inputs.target == 'cloudflare' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -50,7 +51,7 @@ jobs:
             --secrets-file "$secret_file"
 
   netlify:
-    if: ${{ inputs.target == 'both' || inputs.target == 'netlify' }}
+    if: ${{ inputs.target == 'all' || inputs.target == 'netlify' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -86,3 +87,49 @@ jobs:
             --site "$NETLIFY_SITE_ID" \
             --dir relay/netlify/public \
             --functions netlify/functions
+
+
+  github:
+    if: ${{ inputs.target == 'all' || inputs.target == 'github' }}
+    runs-on: [self-hosted, linux, link-to-cloud-relay]
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Validate GitHub relay host
+        env:
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          RELAY_DOMAIN: ${{ vars.GITHUB_RELAY_DOMAIN }}
+        run: |
+          set -eu
+          test "${#RELAY_SHARED_SECRET}" -ge 32
+          test -n "$RELAY_DOMAIN"
+          command -v docker >/dev/null
+          docker compose version >/dev/null
+          command -v curl >/dev/null
+      - name: Deploy GitHub self-hosted worker relay
+        env:
+          RELAY_SHARED_SECRET: ${{ secrets.RELAY_SHARED_SECRET }}
+          RELAY_DOMAIN: ${{ vars.GITHUB_RELAY_DOMAIN }}
+        run: |
+          set -eu
+          secret_dir="$HOME/.config/link-to-cloud"
+          secret_file="$secret_dir/relay-shared-secret"
+          mkdir -p "$secret_dir"
+          umask 077
+          printf '%s' "$RELAY_SHARED_SECRET" > "$secret_file"
+          chmod 600 "$secret_file"
+          export RELAY_SHARED_SECRET_FILE="$secret_file"
+
+          docker compose             --project-name link-to-cloud-github-relay             --file relay/github/compose.yml             up --detach --build --remove-orphans
+
+          i=0
+          until curl --fail --silent --show-error --max-time 5 "https://$RELAY_DOMAIN/relay" >/dev/null; do
+            i=$((i + 1))
+            if [ "$i" -ge 18 ]; then
+              docker compose                 --project-name link-to-cloud-github-relay                 --file relay/github/compose.yml                 ps
+              docker compose                 --project-name link-to-cloud-github-relay                 --file relay/github/compose.yml                 logs --tail=100
+              exit 1
+            fi
+            sleep 5
+          done

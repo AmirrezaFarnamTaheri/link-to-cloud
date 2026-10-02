@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertPublic, safeFetch } from "../src/lib/net";
+import { assertPublic, parseHeaderLine, safeFetch } from "../src/lib/net";
 
 test("SSRF checks reject private, reserved, and non-global IPv4/IPv6 ranges", async () => {
   const rejected = [
@@ -157,4 +157,9 @@ test("relay configuration is fail-closed and can be bypassed by a trusted relay 
     if (oldSecret === undefined) delete process.env.RELAY_SHARED_SECRET;
     else process.env.RELAY_SHARED_SECRET = oldSecret;
   }
+});
+
+
+test("custom source headers cannot control transport content encoding", () => {
+  assert.throws(() => parseHeaderLine("Accept-Encoding: gzip"), /header name not allowed/i);
 });

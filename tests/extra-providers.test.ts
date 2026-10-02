@@ -229,3 +229,141 @@ test("OneDrive maps rename/overwrite and skips an existing destination before up
     globalThis.fetch = originalFetch;
   }
 });
+
+
+test("Dropbox skip treats only path/not_found as a missing destination", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (input) => {
+    assert.equal(String(input), "https://api.dropboxapi.com/2/files/get_metadata");
+    return new Response(JSON.stringify({
+      error_summary: "path/restricted_content/",
+      error: { ".tag": "path", path: { ".tag": "restricted_content" } },
+    }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    await assert.rejects(
+      dropboxProvider.uploadFile(
+        {
+          request: { target: "dropbox", url: "https://files.example/payload.bin", path: "uploads", ifExists: "skip" },
+          source: new Response(bytes),
+          name: "payload.bin",
+          size: bytes.byteLength,
+          emit: () => {},
+          signal: new AbortController().signal,
+        },
+        { accessToken: "test-token", owner: "dropbox:id:test" },
+      ),
+      /restricted_content/i,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("skip uses fail-on-conflict semantics after the destination pre-check", async () => {
+  const originalFetch = globalThis.fetch;
+
+  const oneDriveBodies: unknown[] = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    if (url === "https://graph.microsoft.com/v1.0/me/drive/root:/uploads/payload.bin") {
+      return new Response(JSON.stringify({ error: { message: "not found" } }), {
+        status: 404,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.includes("createUploadSession")) {
+      oneDriveBodies.push(JSON.parse(String(init?.body)));
+      return new Response(JSON.stringify({ uploadUrl: "https://tenant.up.1drv.com/up/session" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "https://tenant.up.1drv.com/up/session") {
+      return new Response(JSON.stringify({ name: "payload.bin", webUrl: "https://onedrive.live.com/item" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected request ${input}`);
+  }) as typeof fetch;
+
+  try {
+    await oneDriveProvider.uploadFile(
+      {
+        request: { target: "onedrive", url: "https://files.example/payload.bin", path: "uploads", ifExists: "skip" },
+        source: new Response(bytes),
+        name: "payload.bin",
+        size: bytes.byteLength,
+        emit: () => {},
+        signal: new AbortController().signal,
+      },
+      { accessToken: "test-token", owner: "onedrive:id:test" },
+    );
+    assert.deepEqual(oneDriveBodies[0], { item: { "@microsoft.graph.conflictBehavior": "fail" } });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const dropboxCalls: Array<{ url: string; arg: unknown }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    const headers = new Headers(init?.headers);
+    const argHeader = headers.get("Dropbox-API-Arg");
+    dropboxCalls.push({
+      url,
+      arg: argHeader ? JSON.parse(argHeader) : JSON.parse(String(init?.body ?? "{}")),
+    });
+    if (url === "https://api.dropboxapi.com/2/files/get_metadata") {
+      return new Response(JSON.stringify({
+        error_summary: "path/not_found/",
+        error: { ".tag": "path", path: { ".tag": "not_found" } },
+      }), {
+        status: 409,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.endsWith("/upload_session/start")) {
+      return new Response(JSON.stringify({ session_id: "session-skip" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url.endsWith("/upload_session/append_v2")) return new Response(null, { status: 200 });
+    if (url.endsWith("/upload_session/finish")) {
+      return new Response(JSON.stringify({ name: "payload.bin", path_display: "/uploads/payload.bin" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    throw new Error(`Unexpected request ${input}`);
+  }) as typeof fetch;
+
+  try {
+    await dropboxProvider.uploadFile(
+      {
+        request: { target: "dropbox", url: "https://files.example/payload.bin", path: "uploads", ifExists: "skip" },
+        source: new Response(bytes),
+        name: "payload.bin",
+        size: bytes.byteLength,
+        emit: () => {},
+        signal: new AbortController().signal,
+      },
+      { accessToken: "test-token", owner: "dropbox:id:test" },
+    );
+    const finish = dropboxCalls.find((call) => call.url.endsWith("/upload_session/finish"));
+    assert.deepEqual((finish?.arg as { commit?: unknown }).commit, {
+      path: "/uploads/payload.bin",
+      mode: "add",
+      autorename: false,
+      mute: false,
+      strict_conflict: true,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

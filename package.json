@@ -7,7 +7,7 @@
     "start": "next start --hostname 0.0.0.0",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/*.test.ts"
+    "test": "tsx --test tests/*.test.ts && node --test relay/*.test.mjs"
   },
   "dependencies": {
     "drizzle-orm": "0.45.2",

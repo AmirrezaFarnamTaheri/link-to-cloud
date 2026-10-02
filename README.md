@@ -156,11 +156,25 @@ Deploy manually with Wrangler or use the `Deploy source relays` workflow. Store 
 
 `netlify/functions/relay.mjs` reuses this repository's DNS-pinned `safeFetch` path with relay recursion explicitly disabled. That preserves the Node implementation's private/special-address rejection and DNS pinning.
 
-Netlify's streamed synchronous Function response is limited to 20 MB and has a short execution window, so this relay is intentionally a **small-file relay**. It rejects known source lengths above 20 MB and also advertises the limit to the main app. Use Cloudflare or a long-running container/VPS relay for larger source bodies.
+Netlify's streamed synchronous Function response is limited to 20 MB and has a short execution window, so this relay is intentionally a **small-file relay**. It rejects known source lengths above 20 MB. For GET transfers it also rejects unknown/untrustworthy lengths instead of risking a platform-truncated body being mistaken for a successful EOF. Use Cloudflare or the GitHub self-hosted worker relay for larger or unknown-length sources.
 
-### GitHub Actions
+### GitHub self-hosted worker relay
 
-GitHub Actions is used to **deploy and verify** the relay implementations, not as a public HTTP byte proxy. GitHub's Actions terms prohibit using GitHub-hosted runners as a general CDN/serverless application or unrelated transfer service. The workflow is therefore operator-triggered and project-scoped: it deploys the Cloudflare and/or Netlify relay, validates required secrets, and never accepts end-user URLs as shell code or workflow inputs.
+`relay/github/worker.mjs` is a persistent Node relay deployed onto a Linux GitHub Actions **self-hosted runner**. GitHub Actions is the deployment/control plane; the byte-serving process runs in Docker on infrastructure you control. This preserves the same synchronous authenticated `/relay` contract without turning a GitHub-hosted runner into a CDN/serverless application.
+
+The GitHub worker performs public-address DNS validation and pins those validated addresses into the outbound socket lookup, preventing DNS rebinding between validation and connection. Redirects are manual, caller source headers are limited to the first origin, `Accept-Encoding` is forced to `identity`, and response bodies are streamed without file staging.
+
+The deployment uses:
+
+- `relay/github/Dockerfile` for the read-only worker container;
+- `relay/github/compose.yml` for worker hardening and persistent Caddy TLS;
+- `relay/github/Caddyfile` for the public HTTPS reverse proxy;
+- a self-hosted runner labeled `self-hosted`, `linux`, and `link-to-cloud-relay`;
+- repository variable `GITHUB_RELAY_DOMAIN` pointing at that runner host.
+
+See `docs/github-worker-relay.md` for host prerequisites, deployment, validation, and rollback.
+
+GitHub-hosted runners are deliberately not used as the live relay runtime. GitHub's Actions terms prohibit using Actions as a content delivery network or as part of a serverless application; the self-hosted deployment model keeps Actions scoped to deployment and verification.
 
 Required repository secrets for `.github/workflows/deploy-relays.yml`:
 
@@ -168,7 +182,11 @@ Required repository secrets for `.github/workflows/deploy-relays.yml`:
 - Cloudflare: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`;
 - Netlify: `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID`.
 
-For Netlify, the workflow stores `RELAY_SHARED_SECRET` as a production Functions secret before deployment. Cloudflare uploads it alongside the Worker deployment using Wrangler's secrets file support.
+Required repository variable for the GitHub worker:
+
+- `GITHUB_RELAY_DOMAIN` — public DNS hostname only, for example `relay.example.com`.
+
+For Netlify, the workflow stores `RELAY_SHARED_SECRET` as a production Functions secret before deployment. Cloudflare uploads it alongside the Worker deployment using Wrangler's secrets file support. The GitHub self-hosted job writes the secret to an owner-only file on the runner host and mounts it into the worker as a Docker secret.
 
 ## Desktop installers
 
@@ -183,4 +201,4 @@ npm test
 npm run build
 ```
 
-The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, authenticated relay routing/fail-closed configuration, GitHub skip behavior and bounded buffering, Google Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, OneDrive trusted upload-session URLs/byte ranges and known-length requirement, Dropbox upload-session commits, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. CI also syntax-checks both relay implementations.
+The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, authenticated relay routing/fail-closed configuration, bounded relay control bodies, source encoding invariants, GitHub skip behavior and bounded buffering, Google Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, OneDrive trusted upload-session URLs/byte ranges and known-length requirement, Dropbox upload-session commits/conflict behavior, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. CI syntax-checks all relay runtimes, dry-runs the Cloudflare bundle, and builds/starts the GitHub relay container before the application production/container builds.
