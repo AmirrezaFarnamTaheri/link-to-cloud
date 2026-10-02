@@ -14,30 +14,44 @@ function StatusIcon({ s }: { s: HistoryItem["status"] }) {
 
 export function History({ enabled, refreshKey }: { enabled: boolean; refreshKey: number }) {
   const [items, setItems] = useState<HistoryItem[] | null>(null);
+  const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     try {
       const r = await fetch("/api/history", { cache: "no-store" });
-      const j = (await r.json()) as { items: HistoryItem[] };
+      if (!r.ok) throw new Error("History request failed");
+      const j = (await r.json()) as { items?: HistoryItem[] };
+      if (!Array.isArray(j.items)) throw new Error("Invalid history response");
       setItems(j.items);
+      setError("");
     } catch {
       setItems([]);
+      setError("Could not load transfer history. Try again later.");
     }
   }, []);
 
   useEffect(() => {
     if (enabled) void load();
-    else setItems([]);
+    else {
+      setItems([]);
+      setError("");
+    }
   }, [enabled, refreshKey, load]);
 
   async function clear() {
     if (!confirm("Clear your transfer history? Files already uploaded are not affected.")) return;
-    await fetch("/api/history", { method: "DELETE" });
-    setItems([]);
+    try {
+      const response = await fetch("/api/history", { method: "DELETE" });
+      if (!response.ok) throw new Error("History clear failed");
+      setItems([]);
+      setError("");
+    } catch {
+      setError("Could not clear transfer history. Try again later.");
+    }
   }
 
   return (
-    <aside className={cx(card, "p-4")} aria-label="Transfer history">
+    <aside className={cx(card, "p-4")} aria-label="Transfer history" aria-busy={items === null}>
       <div className="mb-3 flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-sm font-semibold">
           <IconClock className="size-4 text-slate-400" /> Recent transfers
@@ -49,7 +63,12 @@ export function History({ enabled, refreshKey }: { enabled: boolean; refreshKey:
         )}
       </div>
 
-      {items === null ? (
+      {error ? (
+        <div className="rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-3 text-sm text-red-200" role="alert">
+          <p>{error}</p>
+          <button className="mt-2 text-xs underline underline-offset-2" onClick={() => void load()}>Retry</button>
+        </div>
+      ) : items === null ? (
         <div className="space-y-2">
           {[0, 1, 2].map((i) => (
             <div key={i} className="h-12 animate-pulse rounded-xl bg-white/5" />
@@ -82,7 +101,7 @@ export function History({ enabled, refreshKey }: { enabled: boolean; refreshKey:
                   </div>
                 </div>
                 {h.resultUrl && (
-                  <a href={h.resultUrl} target="_blank" rel="noreferrer" className="rounded-md p-1.5 text-slate-500 transition hover:bg-white/10 hover:text-white" title="Open">
+                  <a href={h.resultUrl} target="_blank" rel="noreferrer" className="rounded-md p-1.5 text-slate-500 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-300" aria-label={`Open ${h.fileName}`}>
                     <IconExternal className="size-4" />
                   </a>
                 )}

@@ -1,4 +1,6 @@
-import type { ReactNode } from "react";
+"use client";
+
+import { useRef, type KeyboardEvent, type ReactNode } from "react";
 
 export const cx = (...a: (string | false | null | undefined)[]) => a.filter(Boolean).join(" ");
 
@@ -143,15 +145,31 @@ export function Spinner({ className = "size-4" }: P) {
 }
 
 /* --------------------------------------------------------------- progress */
-export function ProgressBar({ value, indeterminate }: { value?: number; indeterminate?: boolean }) {
+export function ProgressBar({
+  value,
+  indeterminate,
+  ariaLabel = "Transfer progress",
+}: {
+  value?: number;
+  indeterminate?: boolean;
+  ariaLabel?: string;
+}) {
+  const percent = Math.min(100, Math.max(0, Number.isFinite(value) ? (value ?? 0) * 100 : 0));
   return (
-    <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/10" role="progressbar" aria-valuenow={indeterminate ? undefined : Math.round((value ?? 0) * 100)}>
+    <div
+      className="relative h-1.5 w-full overflow-hidden rounded-full bg-white/10"
+      role="progressbar"
+      aria-label={ariaLabel}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={indeterminate ? undefined : Math.round(percent)}
+    >
       {indeterminate ? (
         <div className="animate-indeterminate absolute inset-y-0 w-1/3 rounded-full bg-gradient-to-r from-indigo-400 to-cyan-400" />
       ) : (
         <div
           className="progress-stripes h-full rounded-full bg-gradient-to-r from-indigo-500 to-cyan-400 transition-[width] duration-200"
-          style={{ width: `${Math.min(100, Math.max(2, (value ?? 0) * 100))}%` }}
+          style={{ width: `${Math.min(100, Math.max(2, percent))}%` }}
         />
       )}
     </div>
@@ -164,28 +182,54 @@ export function Segmented<T extends string>({
   onChange,
   options,
   disabled,
+  ariaLabel,
 }: {
   value: T;
   onChange: (v: T) => void;
   options: { value: T; label: ReactNode }[];
   disabled?: boolean;
+  ariaLabel: string;
 }) {
+  const buttons = useRef<Array<HTMLButtonElement | null>>([]);
+  const selectedIndex = options.findIndex((option) => option.value === value);
+
+  function onKeyDown(event: KeyboardEvent<HTMLButtonElement>, index: number) {
+    let next = index;
+    if (event.key === "ArrowRight" || event.key === "ArrowDown") next = (index + 1) % options.length;
+    else if (event.key === "ArrowLeft" || event.key === "ArrowUp") next = (index + options.length - 1) % options.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = options.length - 1;
+    else return;
+
+    event.preventDefault();
+    if (options.length === 0 || disabled) return;
+    onChange(options[next].value);
+    buttons.current[next]?.focus();
+  }
+
   return (
-    <div className="grid auto-cols-fr grid-flow-col gap-1 rounded-xl border border-white/10 bg-slate-950/50 p-1" role="radiogroup">
-      {options.map((o) => (
+    <div
+      className="grid auto-cols-fr grid-flow-col gap-1 rounded-xl border border-white/10 bg-slate-950/50 p-1"
+      role="radiogroup"
+      aria-label={ariaLabel}
+    >
+      {options.map((option, index) => (
         <button
+          ref={(element) => { buttons.current[index] = element; }}
           type="button"
           role="radio"
-          aria-checked={value === o.value}
-          key={o.value}
+          aria-checked={value === option.value}
+          tabIndex={selectedIndex === index || (selectedIndex < 0 && index === 0) ? 0 : -1}
+          key={option.value}
           disabled={disabled}
-          onClick={() => onChange(o.value)}
+          onClick={() => onChange(option.value)}
+          onKeyDown={(event) => onKeyDown(event, index)}
           className={cx(
-            "flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition disabled:opacity-50",
-            value === o.value ? "bg-white/10 text-white shadow-inner shadow-white/5" : "text-slate-400 hover:text-slate-200",
+            "flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-300 disabled:opacity-50",
+            value === option.value ? "bg-white/10 text-white shadow-inner shadow-white/5" : "text-slate-400 hover:text-slate-200",
           )}
         >
-          {o.label}
+          {option.label}
         </button>
       ))}
     </div>
@@ -195,10 +239,16 @@ export function Segmented<T extends string>({
 export function Toggle({ checked, onChange, children }: { checked: boolean; onChange: (v: boolean) => void; children: ReactNode }) {
   return (
     <label className="flex cursor-pointer select-none items-center gap-2.5 text-sm text-slate-300">
-      <span className={cx("relative h-5 w-9 rounded-full transition", checked ? "bg-indigo-500" : "bg-white/15")}>
+      <input type="checkbox" className="peer sr-only" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+      <span
+        aria-hidden="true"
+        className={cx(
+          "relative h-5 w-9 rounded-full transition peer-focus-visible:ring-4 peer-focus-visible:ring-indigo-400/50",
+          checked ? "bg-indigo-500" : "bg-white/15",
+        )}
+      >
         <span className={cx("absolute top-0.5 size-4 rounded-full bg-white transition-all", checked ? "left-[18px]" : "left-0.5")} />
       </span>
-      <input type="checkbox" className="sr-only" checked={checked} onChange={(e) => onChange(e.target.checked)} />
       {children}
     </label>
   );

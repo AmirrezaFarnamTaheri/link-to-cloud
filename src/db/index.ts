@@ -15,6 +15,9 @@ export const pool =
   globalForDb.__arenaNextJsPostgresqlPool ??
   new Pool({
     connectionString: databaseUrl,
+    connectionTimeoutMillis: 10_000,
+    idleTimeoutMillis: 30_000,
+    query_timeout: 30_000,
   });
 
 if (process.env.NODE_ENV !== "production") {

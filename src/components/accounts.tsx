@@ -47,14 +47,21 @@ export function Accounts({ s, onChange, notice }: { s: SessionInfo | null; onCha
         setShowPat(false);
         onChange();
       }
+    } catch {
+      setErr("Could not reach the server.");
     } finally {
       setBusy(false);
     }
   }
 
   async function logout(provider: "github" | "google") {
-    await fetch("/api/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
-    onChange();
+    try {
+      const response = await fetch("/api/auth/logout", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ provider }) });
+      if (!response.ok) throw new Error("Disconnect failed");
+      onChange();
+    } catch {
+      setErr(`Could not disconnect ${provider}. Try again.`);
+    }
   }
 
   const gh = s?.github;
@@ -65,6 +72,7 @@ export function Accounts({ s, onChange, notice }: { s: SessionInfo | null; onCha
         className={field}
         type="password"
         autoComplete="off"
+        maxLength={512}
         placeholder="ghp_… or github_pat_…"
         value={pat}
         onChange={(e) => setPat(e.target.value)}
@@ -77,7 +85,7 @@ export function Accounts({ s, onChange, notice }: { s: SessionInfo | null; onCha
         <button className={btnGhost} disabled={!pat || busy}>
           {busy ? <Spinner className="size-3.5" /> : <IconKey className="size-3.5" />} Connect with token
         </button>
-        {err && <span className="text-xs text-red-400">{err}</span>}
+        {err && <span className="text-xs text-red-400" role="alert">{err}</span>}
       </div>
     </form>
   );

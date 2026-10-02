@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import net from "node:net";
+import { Agent } from "undici";
 
 export class HttpError extends Error {
   constructor(
@@ -10,26 +11,82 @@ export class HttpError extends Error {
   }
 }
 
-function isPrivateIp(ip: string): boolean {
-  if (net.isIPv4(ip)) {
-    const [a, b] = ip.split(".").map(Number);
-    return (
-      a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
-      (a === 100 && b >= 64 && b <= 127) || a >= 224
-    );
+function isPrivateIPv4(ip: string): boolean {
+  if (!net.isIPv4(ip)) return true;
+  const [a, b, c] = ip.split(".").map(Number);
+  return (
+    a === 0 || a === 10 || a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) ||
+    (a === 198 && ((b === 18 || b === 19) || (b === 51 && c === 100))) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
+  );
+}
+
+function ipv6Groups(ip: string): number[] | null {
+  let address = ip.toLowerCase();
+  if (address.includes(".")) {
+    const lastColon = address.lastIndexOf(":");
+    const ipv4 = address.slice(lastColon + 1);
+    if (!net.isIPv4(ipv4)) return null;
+    const [a, b, c, d] = ipv4.split(".").map(Number);
+    address = `${address.slice(0, lastColon + 1)}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`;
   }
-  const l = ip.toLowerCase();
-  if (l.startsWith("::ffff:")) return isPrivateIp(l.slice(7));
-  return l === "::1" || l === "::" || l.startsWith("fc") || l.startsWith("fd") || l.startsWith("fe80");
+
+  const compressedAt = address.indexOf("::");
+  if (compressedAt !== address.lastIndexOf("::")) return null;
+  const left = (compressedAt < 0 ? address : address.slice(0, compressedAt)).split(":").filter(Boolean);
+  const right = compressedAt < 0 ? [] : address.slice(compressedAt + 2).split(":").filter(Boolean);
+  const zeroCount = compressedAt < 0 ? 0 : 8 - left.length - right.length;
+  if ((compressedAt < 0 && left.length !== 8) || (compressedAt >= 0 && zeroCount < 1)) return null;
+  const parts = [...left, ...Array.from({ length: zeroCount }, () => "0"), ...right];
+  if (parts.length !== 8 || parts.some((part) => !/^[\da-f]{1,4}$/.test(part))) return null;
+  return parts.map((part) => Number.parseInt(part, 16));
+}
+
+function isPrivateIp(ip: string): boolean {
+  if (net.isIPv4(ip)) return isPrivateIPv4(ip);
+  if (!net.isIPv6(ip)) return true;
+
+  const groups = ipv6Groups(ip);
+  if (!groups) return true;
+
+  // Only globally routable unicast IPv6 addresses (2000::/3) are accepted.
+  // This also blocks loopback, link-local, unique-local, multicast, and mapped IPv4 forms.
+  if ((groups[0] & 0xe000) !== 0x2000) return true;
+
+  // Conservatively exclude IANA special-purpose, documentation, and IPv6 transition space from user-controlled sources.
+  if (groups[0] === 0x2001 && (groups[1] & 0xfe00) === 0) return true; // 2001::/23 IETF assignments, including Teredo
+  if (groups[0] === 0x2001 && groups[1] === 0x0db8) return true; // documentation
+  if (groups[0] === 0x2001 && groups[1] === 0x0002 && groups[2] === 0x0000) return true; // 2001:2::/48 benchmarking
+  if (groups[0] === 0x2001 && groups[1] === 0x0010 && (groups[2] & 0xfff0) === 0) return true; // deprecated ORCHID
+  if (groups[0] === 0x2001 && groups[1] === 0x0020 && (groups[2] & 0xfff0) === 0) return true; // ORCHIDv2
+  if (groups[0] === 0x5f00) return true; // 5f00::/16 Segment Routing SIDs
+  if (groups[0] === 0x3fff && (groups[1] & 0xf000) === 0) return true; // 3fff::/20 documentation
+  if (groups[0] === 0x2002) return true;
+  return false;
+}
+
+type ResolvedAddress = { address: string; family: number };
+
+async function resolvePublicAddresses(u: URL): Promise<ResolvedAddress[]> {
+  if (u.protocol !== "http:" && u.protocol !== "https:") throw new HttpError("Only http(s) links are supported");
+  const host = u.hostname.replace(/^\[|\]$/g, "");
+  const addrs = net.isIP(host)
+    ? [{ address: host, family: net.isIPv4(host) ? 4 : 6 }]
+    : await dns.lookup(host, { all: true, verbatim: true }).catch(() => []);
+  if (!addrs.length) throw new HttpError("Could not resolve host");
+  if (addrs.some((address) => isPrivateIp(address.address))) {
+    throw new HttpError("Private, non-public, or special-use addresses are not allowed");
+  }
+  return addrs;
 }
 
 export async function assertPublic(u: URL) {
-  if (u.protocol !== "http:" && u.protocol !== "https:") throw new HttpError("Only http(s) links are supported");
-  const host = u.hostname.replace(/^\[|\]$/g, "");
-  const addrs = net.isIP(host) ? [{ address: host }] : await dns.lookup(host, { all: true }).catch(() => []);
-  if (!addrs.length) throw new HttpError("Could not resolve host");
-  if (addrs.some((a) => isPrivateIp(a.address))) throw new HttpError("Private/internal addresses are not allowed");
+  await resolvePublicAddresses(u);
 }
 
 /** Rewrite popular "share page" links into direct-download links. */
@@ -71,49 +128,152 @@ export function parseHeaderLine(line?: string): Record<string, string> {
   return { [name]: value };
 }
 
+function pinnedDispatcher(expectedHostname: string, addresses: ResolvedAddress[]): Agent {
+  const expected = expectedHostname.toLowerCase().replace(/\.$/, "");
+  return new Agent({
+    connect: {
+      lookup(hostname, options, callback) {
+        if (hostname.toLowerCase().replace(/\.$/, "") !== expected) {
+          const error = Object.assign(new Error("The connection hostname was not validated"), { code: "ENOTFOUND" });
+          callback(error, "", 0);
+          return;
+        }
+        const candidates = addresses.filter((address) => !options.family || options.family === address.family);
+        if (!candidates.length) {
+          const error = Object.assign(new Error("No validated address for the requested IP family"), { code: "ENOTFOUND" });
+          callback(error, "", 0);
+          return;
+        }
+        if (options.all) callback(null, candidates);
+        else callback(null, candidates[0].address, candidates[0].family);
+      },
+    },
+  });
+}
+
+function responseWithCleanup(
+  res: Response,
+  cleanup: () => Promise<void>,
+  onFailure: (error: unknown) => void,
+  idleTimeoutMs: number,
+): Response {
+  if (!res.body) return res;
+  const reader = res.body.getReader();
+  let closePromise: Promise<void> | undefined;
+  const close = () => {
+    closePromise ??= cleanup().catch(() => {});
+    return closePromise;
+  };
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new HttpError("The source stopped sending data", 502)), idleTimeoutMs);
+          }),
+        ]);
+        if (result.done) {
+          void close();
+          controller.close();
+        } else {
+          controller.enqueue(result.value);
+        }
+      } catch (error) {
+        onFailure(error);
+        await reader.cancel(error).catch(() => {});
+        void close();
+        controller.error(error);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    },
+    async cancel(reason) {
+      onFailure(reason);
+      try {
+        await reader.cancel(reason);
+      } finally {
+        await close();
+      }
+    },
+  }, { highWaterMark: 0 });
+  return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
+}
+
 /**
- * Fetch with manual, SSRF-checked redirects and a header timeout.
+ * Fetch with manually checked and pinned public addresses, SSRF-checked redirects, header and body-idle timeouts.
  * Custom headers are only sent to the original origin.
  */
 export async function safeFetch(
   link: string,
-  opts: { headers?: Record<string, string>; method?: "GET" | "HEAD"; signal?: AbortSignal; timeoutMs?: number } = {},
+  opts: {
+    headers?: Record<string, string>;
+    method?: "GET" | "HEAD";
+    signal?: AbortSignal;
+    timeoutMs?: number;
+    bodyIdleTimeoutMs?: number;
+    fetcher?: typeof fetch;
+  } = {},
 ): Promise<{ res: Response; finalUrl: URL }> {
   let u = new URL(normalizeUrl(link));
   const firstOrigin = u.origin;
+  const fetcher = opts.fetcher ?? fetch;
   for (let i = 0; i < 8; i++) {
-    await assertPublic(u);
-    const ac = new AbortController();
-    const onAbort = () => ac.abort();
-    opts.signal?.addEventListener("abort", onAbort);
-    if (opts.signal?.aborted) ac.abort();
-    const timer = setTimeout(() => ac.abort(new Error("timeout")), opts.timeoutMs ?? 30_000);
+    const addresses = await resolvePublicAddresses(u);
+    const hostname = u.hostname.replace(/^\[|\]$/g, "");
+    const dispatcher = pinnedDispatcher(hostname, addresses);
+    const headerTimeout = new AbortController();
+    const signal = opts.signal
+      ? AbortSignal.any([headerTimeout.signal, opts.signal])
+      : headerTimeout.signal;
+    const timer = setTimeout(() => headerTimeout.abort(new Error("timeout")), opts.timeoutMs ?? 30_000);
     let res: Response;
     try {
-      res = await fetch(u, {
+      res = await fetcher(u, {
         method: opts.method ?? "GET",
         redirect: "manual",
-        signal: ac.signal,
+        signal,
+        dispatcher,
         headers: {
           "User-Agent": "Relay/1.0 (+link-to-cloud)",
           Accept: "*/*",
           ...(u.origin === firstOrigin ? opts.headers : {}),
         },
-      });
-    } catch (e) {
-      if (opts.signal?.aborted) throw e;
-      throw new HttpError(ac.signal.aborted ? "The source server took too long to respond" : "Could not reach the source server", 502);
+      } as RequestInit);
+    } catch (error) {
+      await dispatcher.destroy(error instanceof Error ? error : new Error("Source request failed")).catch(() => {});
+      if (opts.signal?.aborted) throw error;
+      throw new HttpError(
+        headerTimeout.signal.aborted ? "The source server took too long to respond" : "Could not reach the source server",
+        502,
+      );
     } finally {
       clearTimeout(timer);
     }
     if (res.status >= 300 && res.status < 400 && res.headers.get("location")) {
       await res.body?.cancel().catch(() => {});
+      await dispatcher.close().catch(() => {});
+      headerTimeout.abort(new Error("redirect complete"));
       u = new URL(res.headers.get("location")!, u);
       continue;
     }
-    // Body streaming should not be cut by the header timeout, but must still honour the caller's signal.
-    if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
-    return { res, finalUrl: u };
+    // The timeout only applies until response headers arrive; the caller's signal remains
+    // linked to the fetch while its body is consumed, so cancelling a transfer interrupts I/O.
+    if (!res.body) {
+      await dispatcher.close().catch(() => {});
+      return { res, finalUrl: u };
+    }
+    const bodyIdleTimeoutMs = opts.bodyIdleTimeoutMs ?? 120_000;
+    if (!Number.isSafeInteger(bodyIdleTimeoutMs) || bodyIdleTimeoutMs < 1) {
+      await res.body.cancel().catch(() => {});
+      await dispatcher.close().catch(() => {});
+      throw new Error("bodyIdleTimeoutMs must be a positive safe integer");
+    }
+    return {
+      res: responseWithCleanup(res, () => dispatcher.close(), (error) => headerTimeout.abort(error), bodyIdleTimeoutMs),
+      finalUrl: u,
+    };
   }
   throw new HttpError("Too many redirects", 502);
 }
@@ -170,8 +330,10 @@ export function guessName(res: Response, finalUrl: URL): string {
 export function knownSize(res: Response): number | null {
   const enc = (res.headers.get("content-encoding") ?? "").toLowerCase();
   if (enc && enc !== "identity") return null;
-  const n = Number(res.headers.get("content-length"));
-  return Number.isFinite(n) && n > 0 ? n : null;
+  const raw = res.headers.get("content-length");
+  if (raw === null || !/^\d+$/.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
 }
 
 export function mimeOf(res: Response): string {

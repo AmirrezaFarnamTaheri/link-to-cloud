@@ -1,6 +1,6 @@
 import { bigint, index, integer, pgTable, text, timestamp, uuid } from "drizzle-orm/pg-core";
 
-/** One row per attempted transfer. `owner` is "github:<login>" or "google:<email>". */
+/** One row per attempted transfer; current owner keys use immutable provider IDs, with legacy keys on old rows. */
 export const transfers = pgTable(
   "transfers",
   {

@@ -1,4 +1,14 @@
-// Types shared between server routes and client components.
+// Wire types shared between server routes and client components.
+
+export type TransferTarget = "github" | "drive";
+
+export type ProviderInfo = {
+  id: TransferTarget;
+  displayName: string;
+  icon: "github" | "drive";
+  maxFileBytes: number | null;
+  uploadMode: "buffered" | "chunked-stream";
+};
 
 export type SessionInfo = {
   github: { login: string; via: "oauth" | "token" } | null;
@@ -16,8 +26,8 @@ export type InspectResult =
 export type TransferDone = {
   name: string;
   url: string;
-  bytes: number;
-  sha256: string;
+  bytes: number | null;
+  sha256: string | null;
   location: string;
   durationMs: number;
   skipped?: boolean;
@@ -28,30 +38,39 @@ export type TransferDone = {
 export type TransferEvent =
   | { type: "start"; name: string; size: number | null; mime: string }
   | { type: "phase"; phase: "connecting" | "creating-repo" | "creating-folder" | "committing" | "uploading" }
+  | { type: "destination-created"; target: "github"; repo: string }
+  | { type: "destination-created"; target: "drive"; folderId: string }
   | { type: "progress"; phase: "download" | "upload"; bytes: number; total: number | null }
   | ({ type: "done" } & TransferDone)
   | { type: "error"; error: string };
 
-export type TransferRequest = {
+export type TransferBase = {
   url: string;
-  target: "github" | "drive";
   filename?: string;
   header?: string;
-  // github
+};
+
+export type GitHubTransferRequest = TransferBase & {
+  target: "github";
   repo?: string;
   newRepo?: { name: string; private: boolean; description?: string };
   branch?: string;
   path?: string;
   message?: string;
   ifExists?: "overwrite" | "rename" | "skip";
-  // drive
+};
+
+export type DriveTransferRequest = TransferBase & {
+  target: "drive";
   folderId?: string;
   newFolder?: string;
 };
 
+export type TransferRequest = GitHubTransferRequest | DriveTransferRequest;
+
 export type HistoryItem = {
   id: string;
-  target: "github" | "drive";
+  target: TransferTarget;
   status: "success" | "skipped" | "failed" | "cancelled";
   fileName: string;
   sourceUrl: string;

@@ -1,23 +1,16 @@
 import { NextResponse } from "next/server";
-import { getGoogleAuth } from "@/lib/google";
 import { clearTransfers, listTransfers } from "@/lib/history";
-import { getSession } from "@/lib/session";
+import { sessionOwnerKeys } from "@/lib/owners";
+import { getSession, isSameOriginRequest } from "@/lib/session";
 import type { HistoryItem } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
-async function owners(): Promise<string[]> {
-  const s = await getSession();
-  const out: string[] = [];
-  if (s.github) out.push(`github:${s.github.login}`);
-  const g = s.google ? await getGoogleAuth() : null;
-  if (g) out.push(`google:${g.email}`);
-  return out;
-}
+const noStore = { "Cache-Control": "no-store" };
 
 export async function GET() {
   try {
-    const rows = await listTransfers(await owners());
+    const rows = await listTransfers(sessionOwnerKeys(await getSession()));
     const items: HistoryItem[] = rows.map((r) => ({
       id: r.id,
       target: r.target as HistoryItem["target"],
@@ -32,13 +25,18 @@ export async function GET() {
       durationMs: r.durationMs,
       createdAt: r.createdAt.toISOString(),
     }));
-    return NextResponse.json({ items });
+    return NextResponse.json({ items }, { headers: noStore });
   } catch {
-    return NextResponse.json({ items: [] });
+    return NextResponse.json({ error: "Transfer history is temporarily unavailable" }, { status: 503, headers: noStore });
   }
 }
 
-export async function DELETE() {
-  await clearTransfers(await owners());
-  return NextResponse.json({ ok: true });
+export async function DELETE(req: Request) {
+  if (!isSameOriginRequest(req)) return NextResponse.json({ error: "Cross-origin request rejected" }, { status: 403, headers: noStore });
+  try {
+    await clearTransfers(sessionOwnerKeys(await getSession()));
+    return NextResponse.json({ ok: true }, { headers: noStore });
+  } catch {
+    return NextResponse.json({ error: "Could not clear transfer history" }, { status: 503, headers: noStore });
+  }
 }
