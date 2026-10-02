@@ -98,12 +98,14 @@ export type DriveTransferRequest = TransferBase & {
 export type OneDriveTransferRequest = TransferBase & {
   target: "onedrive";
   path?: string;
+  ifExists?: "overwrite" | "rename" | "skip";
 };
 
 /** Upload to a path below the connected user's Dropbox root. */
 export type DropboxTransferRequest = TransferBase & {
   target: "dropbox";
   path?: string;
+  ifExists?: "overwrite" | "rename" | "skip";
 };
 
 /**

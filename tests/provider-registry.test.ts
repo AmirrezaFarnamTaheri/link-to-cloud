@@ -18,3 +18,19 @@ test("the registry rejects duplicate provider IDs", () => {
   assert.ok(github);
   assert.throws(() => registerProvider(github), /already registered/i);
 });
+
+
+test("the registry rejects malformed providers before they can serve transfers", () => {
+  assert.throws(
+    () => registerProvider({
+      id: "broken-provider",
+      displayName: "Broken",
+      icon: "cloud",
+      maxFileBytes: null,
+      uploadMode: "chunked-stream",
+      resolveCredentials: undefined,
+      uploadFile: undefined,
+    } as never),
+    /missing required members|invalid metadata/i,
+  );
+});

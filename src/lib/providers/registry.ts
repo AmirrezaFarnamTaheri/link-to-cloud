@@ -10,7 +10,26 @@ const providers = new Map<string, StorageProvider>();
 const PROVIDER_ID_RE = /^[a-z][a-z0-9-]{1,62}$/;
 const PACKAGE_NAME_RE = /^(?:@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/;
 
+function assertProvider(provider: StorageProvider): void {
+  const validIcon = ["github", "drive", "onedrive", "dropbox", "cloud"].includes(provider.icon);
+  const validMax = provider.maxFileBytes === null ||
+    (typeof provider.maxFileBytes === "number" && Number.isSafeInteger(provider.maxFileBytes) && provider.maxFileBytes >= 0);
+  if (
+    typeof provider.id !== "string" ||
+    typeof provider.displayName !== "string" ||
+    !provider.displayName.trim() ||
+    !validIcon ||
+    !validMax ||
+    (provider.uploadMode !== "buffered" && provider.uploadMode !== "chunked-stream") ||
+    typeof provider.resolveCredentials !== "function" ||
+    typeof provider.uploadFile !== "function"
+  ) {
+    throw new Error("Storage provider is missing required members or contains invalid metadata");
+  }
+}
+
 export function registerProvider(provider: StorageProvider): void {
+  assertProvider(provider);
   if (!PROVIDER_ID_RE.test(provider.id)) throw new Error(`Storage provider ID "${provider.id}" is invalid`);
   if (providers.has(provider.id)) throw new Error(`Storage provider "${provider.id}" is already registered`);
   providers.set(provider.id, provider);
@@ -38,7 +57,9 @@ function pluginProviders(value: unknown): StorageProvider[] {
   if (!list.length || list.some((provider) => !provider || typeof provider !== "object")) {
     throw new Error("must export a provider or providers array");
   }
-  return list as StorageProvider[];
+  const typed = list as StorageProvider[];
+  for (const provider of typed) assertProvider(provider);
+  return typed;
 }
 
 /**

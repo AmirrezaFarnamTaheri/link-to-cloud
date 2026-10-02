@@ -9,6 +9,7 @@ import type { StorageProvider } from "./types";
 import { ChunkReader } from "./chunk-reader";
 import { progressEmitter } from "./shared";
 
+const API = "https://api.dropboxapi.com/2/files";
 const CONTENT_API = "https://content.dropboxapi.com/2/files";
 const CHUNK_SIZE = 8 * 1024 * 1024;
 
@@ -45,6 +46,29 @@ function entryResult(entry: DropboxEntry, path: string) {
   return { name, path: actualPath };
 }
 
+
+async function existingEntry(accessToken: string, path: string, signal: AbortSignal): Promise<DropboxEntry | null> {
+  const response = await fetch(`${API}/get_metadata`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ path, include_deleted: false }),
+    signal: withTimeout(signal, 30_000),
+  }).catch(() => null);
+  if (!response) throw new HttpError("Dropbox could not check the destination: network error", 502);
+  if (response.status === 409) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!response.ok) {
+    const message = await errorText(response);
+    throw new HttpError(`Dropbox could not check the destination: ${message}`, response.status === 401 ? 401 : 502);
+  }
+  return (await response.json().catch(() => ({}))) as DropboxEntry;
+}
+
 function isDropboxRequest(request: TransferRequest): request is DropboxTransferRequest {
   return request.target === "dropbox" && !("destination" in request);
 }
@@ -69,6 +93,25 @@ export const dropboxProvider: StorageProvider = {
     if (!source.body) throw new HttpError("The source did not provide a response body", 502);
     const path = checkedPath(request.path, name);
     const startedAt = Date.now();
+    const ifExists = request.ifExists ?? "rename";
+
+    if (ifExists === "skip") {
+      const existing = await existingEntry(credentials.accessToken, path, signal);
+      if (existing) {
+        await source.body.cancel().catch(() => {});
+        const result = entryResult(existing, path);
+        return {
+          name: result.name,
+          url: "https://www.dropbox.com/home",
+          bytes: size,
+          sha256: null,
+          location: `Dropbox ${result.path}`,
+          durationMs: Date.now() - startedAt,
+          skipped: true,
+        };
+      }
+    }
+
     const reader = new ChunkReader(source.body);
     const hash = createHash("sha256");
     const progress = progressEmitter(emit, "upload", size);
@@ -113,7 +156,13 @@ export const dropboxProvider: StorageProvider = {
         method: "POST",
         headers: apiHeaders(credentials.accessToken, {
           cursor: { session_id: sessionId, offset },
-          commit: { path, mode: "add", autorename: true, mute: false, strict_conflict: false },
+          commit: {
+            path,
+            mode: ifExists === "overwrite" ? "overwrite" : "add",
+            autorename: ifExists !== "overwrite",
+            mute: false,
+            strict_conflict: false,
+          },
         }),
         body: new Uint8Array(),
         signal: withTimeout(signal, 120_000),

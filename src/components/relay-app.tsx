@@ -229,7 +229,8 @@ export function RelayApp() {
     const i = infoFor(u);
     return i && i !== "loading" && i.ok && i.size != null && i.size > GITHUB_MAX_BYTES;
   });
-  const targetAvailable = providers.some((provider) => provider.id === (dest.target.startsWith("plugin:") ? dest.target.slice("plugin:".length) : dest.target));
+  const targetProviderId = dest.target.startsWith("plugin:") ? dest.target.slice("plugin:".length) : dest.target;
+  const targetAvailable = providers.some((provider) => provider.id === targetProviderId);
   const canRun = targetAvailable && connected && destOk && urls.length > 0 && !running;
 
   /* ---- run ---- */
@@ -286,9 +287,9 @@ export function RelayApp() {
             : { folderId: folderOverride ?? (dest.folderId || undefined) }),
         };
       } else if (dest.target === "onedrive") {
-        payload = { ...base, target: "onedrive", path: dest.remotePath || undefined };
+        payload = { ...base, target: "onedrive", path: dest.remotePath || undefined, ifExists: dest.ifExists };
       } else if (dest.target === "dropbox") {
-        payload = { ...base, target: "dropbox", path: dest.remotePath || undefined };
+        payload = { ...base, target: "dropbox", path: dest.remotePath || undefined, ifExists: dest.ifExists };
       } else {
         payload = { ...base, target: dest.target as PluginTarget, destination: dest.pluginDestination };
       }
@@ -371,7 +372,7 @@ export function RelayApp() {
   const failN = runList.filter((r) => r.status === "error").length;
   const allFinished = runList.length > 0 && !running;
 
-  const targetName = providers.find((provider) => provider.id === dest.target)?.displayName ?? "destination";
+  const targetName = providers.find((provider) => provider.id === targetProviderId)?.displayName ?? "destination";
 
   return (
     <div className="space-y-6">
@@ -476,7 +477,7 @@ export function RelayApp() {
                                   {r.kind === "download"
                                     ? `Downloading from source${dest.target === "github" ? " (then commit)" : ""}`
                                     : r.kind === "upload"
-                                      ? "Streaming to Google Drive"
+                                      ? `Streaming to ${targetName}`
                                       : PHASE_TEXT[r.phase ?? ""] ?? "Working…"}
                                 </span>
                                 {r.kind && (

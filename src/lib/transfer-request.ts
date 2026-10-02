@@ -80,6 +80,15 @@ function parseDestinationPath(value: Record<string, unknown>, key = "path"): str
   return clean;
 }
 
+function parseIfExists(value: Record<string, unknown>): "overwrite" | "rename" | "skip" | undefined {
+  const ifExists = value.ifExists;
+  if (ifExists === undefined) return undefined;
+  if (ifExists !== "overwrite" && ifExists !== "rename" && ifExists !== "skip") {
+    throw new HttpError("ifExists must be overwrite, rename, or skip");
+  }
+  return ifExists;
+}
+
 function parseGitHub(value: Record<string, unknown>): GitHubTransferRequest {
   rejectUnknownKeys(
     value,
@@ -121,10 +130,7 @@ function parseGitHub(value: Record<string, unknown>): GitHubTransferRequest {
     }
   }
   const message = optionalString(value, "message", 200)?.trim();
-  const ifExists = value.ifExists;
-  if (ifExists !== undefined && ifExists !== "overwrite" && ifExists !== "rename" && ifExists !== "skip") {
-    throw new HttpError("ifExists must be overwrite, rename, or skip");
-  }
+  const ifExists = parseIfExists(value);
 
   return {
     ...base,
@@ -155,13 +161,17 @@ function parseDrive(value: Record<string, unknown>): DriveTransferRequest {
 }
 
 function parseOneDrive(value: Record<string, unknown>): OneDriveTransferRequest {
-  rejectUnknownKeys(value, ["url", "target", "filename", "header", "path"], "request");
-  return { ...parseBase(value), target: "onedrive", ...(parseDestinationPath(value) ? { path: parseDestinationPath(value) } : {}) };
+  rejectUnknownKeys(value, ["url", "target", "filename", "header", "path", "ifExists"], "request");
+  const path = parseDestinationPath(value);
+  const ifExists = parseIfExists(value);
+  return { ...parseBase(value), target: "onedrive", ...(path ? { path } : {}), ...(ifExists ? { ifExists } : {}) };
 }
 
 function parseDropbox(value: Record<string, unknown>): DropboxTransferRequest {
-  rejectUnknownKeys(value, ["url", "target", "filename", "header", "path"], "request");
-  return { ...parseBase(value), target: "dropbox", ...(parseDestinationPath(value) ? { path: parseDestinationPath(value) } : {}) };
+  rejectUnknownKeys(value, ["url", "target", "filename", "header", "path", "ifExists"], "request");
+  const path = parseDestinationPath(value);
+  const ifExists = parseIfExists(value);
+  return { ...parseBase(value), target: "dropbox", ...(path ? { path } : {}), ...(ifExists ? { ifExists } : {}) };
 }
 
 function parsePlugin(value: Record<string, unknown>, target: string): PluginTransferRequest {

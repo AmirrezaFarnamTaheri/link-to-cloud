@@ -56,8 +56,33 @@ function fileResult(body: DriveItem, fallback: string): { name: string; url: str
   };
 }
 
-async function uploadEmptyFile(accessToken: string, encodedPath: string, mime: string, signal: AbortSignal): Promise<DriveItem> {
-  const response = await fetch(`${GRAPH}/me/drive/root:/${encodedPath}:/content`, {
+async function existingItem(accessToken: string, encodedPath: string, signal: AbortSignal): Promise<DriveItem | null> {
+  const response = await fetch(`${GRAPH}/me/drive/root:/${encodedPath}`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+    signal: withTimeout(signal, 30_000),
+  }).catch(() => null);
+  if (!response) throw new HttpError("OneDrive could not check the destination: network error", 502);
+  if (response.status === 404) {
+    await response.body?.cancel().catch(() => {});
+    return null;
+  }
+  if (!response.ok) {
+    const message = await errorText(response);
+    throw new HttpError(`OneDrive could not check the destination: ${message}`, response.status === 401 ? 401 : 502);
+  }
+  return (await response.json().catch(() => ({}))) as DriveItem;
+}
+
+async function uploadEmptyFile(
+  accessToken: string,
+  encodedPath: string,
+  mime: string,
+  conflictBehavior: "replace" | "rename",
+  signal: AbortSignal,
+): Promise<DriveItem> {
+  const url = new URL(`${GRAPH}/me/drive/root:/${encodedPath}:/content`);
+  url.searchParams.set("@microsoft.graph.conflictBehavior", conflictBehavior);
+  const response = await fetch(url, {
     method: "PUT",
     headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": mime, "Content-Length": "0" },
     body: new Uint8Array(),
@@ -99,8 +124,28 @@ export const oneDriveProvider: StorageProvider = {
     const { path, encoded } = encodePath(request.path, name);
     const mime = mimeOf(source);
     const startedAt = Date.now();
+    const ifExists = request.ifExists ?? "rename";
+    const conflictBehavior = ifExists === "overwrite" ? "replace" : "rename";
+
+    if (ifExists === "skip") {
+      const existing = await existingItem(credentials.accessToken, encoded, signal);
+      if (existing) {
+        await source.body.cancel().catch(() => {});
+        const result = fileResult(existing, name);
+        return {
+          name: result.name,
+          url: result.url,
+          bytes: size,
+          sha256: null,
+          location: `OneDrive / ${path}`,
+          durationMs: Date.now() - startedAt,
+          skipped: true,
+        };
+      }
+    }
+
     if (size === 0) {
-      const item = await uploadEmptyFile(credentials.accessToken, encoded, mime, signal);
+      const item = await uploadEmptyFile(credentials.accessToken, encoded, mime, conflictBehavior, signal);
       const result = fileResult(item, name);
       return {
         name: result.name,
@@ -115,7 +160,7 @@ export const oneDriveProvider: StorageProvider = {
     const sessionResponse = await fetch(`${GRAPH}/me/drive/root:/${encoded}:/createUploadSession`, {
       method: "POST",
       headers: { Authorization: `Bearer ${credentials.accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ item: { "@microsoft.graph.conflictBehavior": "replace" } }),
+      body: JSON.stringify({ item: { "@microsoft.graph.conflictBehavior": conflictBehavior } }),
       signal: withTimeout(signal, 30_000),
     }).catch(() => null);
     if (!sessionResponse?.ok) {

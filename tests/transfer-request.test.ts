@@ -23,12 +23,14 @@ test("valid GitHub and Drive request shapes are parsed as discriminated targets"
 });
 
 test("OneDrive and Dropbox accept only relative destination paths", () => {
-  const oneDrive = validateTransferRequest({ ...base, target: "onedrive", path: "exports/2026" });
-  const dropbox = validateTransferRequest({ ...base, target: "dropbox", path: "exports/2026" });
-  assert.deepEqual(oneDrive, { ...base, target: "onedrive", path: "exports/2026" });
-  assert.deepEqual(dropbox, { ...base, target: "dropbox", path: "exports/2026" });
+  const oneDrive = validateTransferRequest({ ...base, target: "onedrive", path: "exports/2026", ifExists: "overwrite" });
+  const dropbox = validateTransferRequest({ ...base, target: "dropbox", path: "exports/2026", ifExists: "skip" });
+  assert.deepEqual(oneDrive, { ...base, target: "onedrive", path: "exports/2026", ifExists: "overwrite" });
+  assert.deepEqual(dropbox, { ...base, target: "dropbox", path: "exports/2026", ifExists: "skip" });
   assert.throws(() => validateTransferRequest({ ...base, target: "onedrive", path: "safe/../private" }), /destination folder path/i);
   assert.throws(() => validateTransferRequest({ ...base, target: "dropbox", path: ".." }), /destination folder path/i);
+  assert.throws(() => validateTransferRequest({ ...base, target: "onedrive", ifExists: "merge" }), /ifExists/i);
+  assert.throws(() => validateTransferRequest({ ...base, target: "dropbox", ifExists: "merge" }), /ifExists/i);
 });
 
 test("operator plugins use a namespaced target and a provider-owned destination schema", () => {

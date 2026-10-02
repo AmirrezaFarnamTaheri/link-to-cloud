@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
+import { getDropboxAuth } from "@/lib/dropbox";
 import { getGoogleAuth } from "@/lib/google";
+import { getOneDriveAuth } from "@/lib/onedrive";
 import { readJsonObjectRequest } from "@/lib/http";
 import { githubOwner } from "@/lib/owners";
 import { guessName, HttpError, knownSize, mimeOf, parseHeaderLine, safeFetch } from "@/lib/net";
@@ -21,7 +23,12 @@ export async function POST(req: Request) {
 
   const session = await getSession();
   const github = session.github ? githubOwner(session.github) : null;
-  if (!github && !(session.google && (await getGoogleAuth())) && !session.onedrive && !session.dropbox) {
+  if (
+    !github &&
+    !(session.google && (await getGoogleAuth())) &&
+    !(session.onedrive && (await getOneDriveAuth())) &&
+    !(session.dropbox && (await getDropboxAuth()))
+  ) {
     return json({ ok: false, error: "Log in first" } satisfies InspectResult, 401);
   }
   if (!allow(`inspect:${clientIp(req)}`, 120, 60_000)) {
