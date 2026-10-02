@@ -3,10 +3,10 @@
 
 import { useEffect, useState } from "react";
 import type { DriveFolder, ProviderInfo, Repo, SessionInfo } from "@/lib/types";
-import { cx, field, IconDrive, IconGithub, IconChevron, label, Segmented, Toggle } from "./ui";
+import { cx, field, IconCloudUp, IconDrive, IconGithub, IconChevron, label, Segmented, Toggle } from "./ui";
 
 export type Dest = {
-  target: "github" | "drive";
+  target: string;
   repoMode: "existing" | "new";
   repo: string;
   newRepo: string;
@@ -19,6 +19,9 @@ export type Dest = {
   folderId: string;
   newFolder: string;
   folderMode: "existing" | "new";
+  /** Folder path for OneDrive/Dropbox and declarative operator plugins. */
+  remotePath: string;
+  pluginDestination: Record<string, string>;
 };
 
 export const defaultDest: Dest = {
@@ -35,9 +38,18 @@ export const defaultDest: Dest = {
   folderId: "",
   newFolder: "",
   folderMode: "existing",
+  remotePath: "",
+  pluginDestination: {},
 };
 
 export const REPO_NAME_RE = /^[\w.-]{1,100}$/;
+const builtinTargets = new Set(["github", "drive", "onedrive", "dropbox"]);
+function uiTarget(providerId: string) {
+  return builtinTargets.has(providerId) ? providerId : `plugin:${providerId}`;
+}
+function providerIdForTarget(target: string) {
+  return target.startsWith("plugin:") ? target.slice("plugin:".length) : target;
+}
 
 export function Destination({
   s,
@@ -64,6 +76,7 @@ export function Destination({
 
   const ghLogin = s?.github?.login;
   const gEmail = s?.google?.email;
+  const selectedProvider = providers.find((provider) => provider.id === providerIdForTarget(dest.target));
 
   useEffect(() => {
     if (!ghLogin) {
@@ -134,10 +147,10 @@ export function Destination({
           value={dest.target}
           onChange={(target) => set({ target })}
           options={providers.map((provider) => {
-            const connected = provider.id === "github" ? !!s?.github : !!s?.google;
-            const Icon = provider.icon === "github" ? IconGithub : IconDrive;
+            const connected = provider.id === "github" ? !!s?.github : provider.id === "drive" ? !!s?.google : provider.id === "onedrive" ? !!s?.onedrive : provider.id === "dropbox" ? !!s?.dropbox : false;
+            const Icon = provider.icon === "github" ? IconGithub : provider.icon === "drive" ? IconDrive : IconCloudUp;
             return {
-              value: provider.id,
+              value: uiTarget(provider.id),
               label: (
                 <>
                   <Icon className="size-4" /> {provider.displayName}{" "}
@@ -263,7 +276,7 @@ export function Destination({
           )}
           <p className="text-[11px] text-slate-500">GitHub rejects files over 100 MiB. Its Contents API requires a base64 JSON payload, so Relay buffers each file in server memory and uses extra memory while encoding; avoid large or concurrent GitHub transfers.</p>
         </div>
-      ) : (
+      ) : dest.target === "drive" ? (
         <div className="space-y-4">
           <Segmented
             ariaLabel="Drive folder selection mode"
@@ -297,6 +310,34 @@ export function Destination({
             </div>
           )}
           <p className="text-[11px] text-slate-500">Uploads use Drive resumable chunks of up to 8 MiB, including sources with unknown size. Relay writes no file to disk and holds at most one application chunk per active Drive transfer; server and provider limits still apply.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {(selectedProvider?.destinationFields?.length ? selectedProvider.destinationFields : [{ key: "path", label: "Destination folder", placeholder: "(root) e.g. uploads/2026", maxLength: 1024 }]).map((destinationField) => {
+            const pluginValue = dest.pluginDestination[destinationField.key] ?? "";
+            const value = dest.target === "onedrive" || dest.target === "dropbox" ? dest.remotePath : pluginValue;
+            return (
+              <div key={destinationField.key}>
+                <span className={label}>{destinationField.label}</span>
+                <input
+                  className={cx(field, "mt-1.5")}
+                  placeholder={destinationField.placeholder}
+                  maxLength={destinationField.maxLength ?? 1024}
+                  required={destinationField.required}
+                  value={value}
+                  onChange={(event) => {
+                    const nextValue = event.target.value;
+                    if (dest.target === "onedrive" || dest.target === "dropbox") set({ remotePath: nextValue });
+                    else setDest((current) => ({ ...current, pluginDestination: { ...current.pluginDestination, [destinationField.key]: nextValue } }));
+                  }}
+                  aria-label={destinationField.label}
+                />
+              </div>
+            );
+          })}
+          {dest.target === "onedrive" && <p className="text-[11px] text-slate-500">OneDrive uses 10 MiB resumable chunks and needs a source Content-Length to remain disk-free and bounded.</p>}
+          {dest.target === "dropbox" && <p className="text-[11px] text-slate-500">Dropbox uses 8 MiB upload-session chunks. A destination name conflict is kept as a separate file.</p>}
+          {!selectedProvider?.destinationFields?.length && dest.target !== "onedrive" && dest.target !== "dropbox" && <p className="text-[11px] text-slate-500">This is an operator-installed provider module. Its server-side adapter validates all destination fields before transferring.</p>}
         </div>
       )}
     </fieldset>

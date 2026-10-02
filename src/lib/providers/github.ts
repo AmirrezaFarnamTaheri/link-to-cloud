@@ -4,9 +4,13 @@ import { HttpError } from "@/lib/net";
 import { githubOwner } from "@/lib/owners";
 import type { Session } from "@/lib/session";
 import { withTimeout } from "@/lib/timeouts";
-import { GITHUB_MAX_BYTES } from "@/lib/types";
+import { GITHUB_MAX_BYTES, type GitHubTransferRequest, type TransferRequest } from "@/lib/types";
 import type { StorageProvider } from "./types";
 import { abortableSleep, progressEmitter, readAll, splitExtension } from "./shared";
+
+function isGitHubRequest(request: TransferRequest): request is GitHubTransferRequest {
+  return request.target === "github" && !("destination" in request);
+}
 
 export const githubProvider: StorageProvider = {
   id: "github",
@@ -24,7 +28,7 @@ export const githubProvider: StorageProvider = {
 
   async uploadFile(context, credentials) {
     const { request, source, size, emit, signal } = context;
-    if (request.target !== "github") throw new HttpError("GitHub received an incompatible transfer request", 400);
+    if (!isGitHubRequest(request)) throw new HttpError("GitHub received an incompatible transfer request", 400);
     const t0 = Date.now();
     let { name } = context;
     if (size !== null && size > GITHUB_MAX_BYTES) {

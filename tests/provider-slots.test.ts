@@ -13,15 +13,17 @@ test("GitHub provider capacity is one transfer per process and release is idempo
   cleanup?.();
 });
 
-test("Drive provider capacity permits two bounded streams and rejects excess work", () => {
-  const first = acquireTransferSlot("drive");
-  const second = acquireTransferSlot("drive");
-  assert.equal(typeof first, "function");
-  assert.equal(typeof second, "function");
-  assert.equal(acquireTransferSlot("drive"), null);
-  first?.();
-  assert.equal(typeof acquireTransferSlot("drive"), "function");
-  const remaining = acquireTransferSlot("drive");
-  second?.();
-  remaining?.();
-});
+for (const target of ["drive", "onedrive", "dropbox"]) {
+  test(`${target} capacity permits two bounded streams and rejects excess work`, () => {
+    const first = acquireTransferSlot(target);
+    const second = acquireTransferSlot(target);
+    assert.equal(typeof first, "function");
+    assert.equal(typeof second, "function");
+    assert.equal(acquireTransferSlot(target), null);
+    first?.();
+    assert.equal(typeof acquireTransferSlot(target), "function");
+    const remaining = acquireTransferSlot(target);
+    second?.();
+    remaining?.();
+  });
+}

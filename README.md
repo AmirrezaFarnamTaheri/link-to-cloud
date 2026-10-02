@@ -1,12 +1,12 @@
 # Link-to-Cloud
 
-A Next.js service that fetches a public HTTP(S) URL from the server and transfers the response into the signed-in user's GitHub repository or Google Drive. The browser sends transfer instructions and receives progress events; it does not receive the file body.
+A Next.js service that fetches a public HTTP(S) URL from the server and transfers the response into the signed-in user's GitHub repository, Google Drive, OneDrive, or Dropbox. The browser sends transfer instructions and receives progress events; it does not receive the file body.
 
 ## Data path and internet usage
 
 ```text
 Browser -- URL/options --> Link-to-Cloud server -- GET --> source host
-Browser <-- progress events -- Link-to-Cloud server -- upload --> GitHub or Google Drive
+Browser <-- progress events -- Link-to-Cloud server -- upload --> selected storage provider
 ```
 
 Where the server runs determines whose connection carries the file:
@@ -22,9 +22,11 @@ The app emits periodic progress events, so browser control traffic is small rela
 | Destination | Upload method | Resource / size behavior |
 | --- | --- | --- |
 | **Google Drive** | Resumable upload in chunks of up to 8 MiB; unknown source lengths are supported. Chunk requests use Drive's 256 KiB alignment rules and can query the resumable session after an interrupted request. | Backpressure is preserved: Relay reads another source chunk after Drive acknowledges the current one. No file is written to disk; application buffering is bounded to one upload chunk plus normal network/runtime buffers. Google and hosting limits still apply. |
-| **GitHub** | GitHub Contents API commit. | The Contents API requires the complete base64 file payload, so Relay buffers each file in server memory and creates an expanded JSON payload. The implementation rejects files over 100 MiB; GitHub warns for files above 50 MiB. Prefer Drive for large files and avoid concurrent large GitHub transfers. When `skip` finds an existing file, Relay cancels the source before reading its body; the known size is recorded if available, and no SHA-256 is produced for that skipped file. |
+| **OneDrive** | Microsoft Graph upload session in 10 MiB chunks (a 320 KiB multiple). | Graph's disk-free upload-session protocol requires a known source `Content-Length`; unknown-length sources are rejected rather than buffered or staged. The opaque upload URL is restricted to Microsoft OneDrive upload hosts, and no bearer token is sent to it. |
+| **Dropbox** | Dropbox upload session in 8 MiB chunks, then an atomic finish request. | Unknown source lengths are supported. Each upload has bounded chunk memory and a streaming SHA-256; Dropbox's `autorename` commit behavior keeps an existing destination file rather than overwriting it. |
+| **GitHub** | GitHub Contents API commit. | The Contents API requires the complete base64 file payload, so Relay buffers each file in server memory and creates an expanded JSON payload. The implementation rejects files over 100 MiB; GitHub warns for files above 50 MiB. Prefer a chunked provider for large files and avoid concurrent large GitHub transfers. When `skip` finds an existing file, Relay cancels the source before reading its body; the known size is recorded if available, and no SHA-256 is produced for that skipped file. |
 
-The server allows at most one active GitHub transfer and two active Drive transfers per Node process; excess requests receive `503` with `Retry-After`. These are per-process limits, so also set service concurrency and maximum instances when deploying multiple containers. The in-memory rate limiter is likewise per process and bounded to 5,000 recent keys. By default it uses the rightmost syntactically valid `X-Forwarded-For` address as a best-effort bucket. This is trustworthy only when your ingress controls or appends the header and direct access cannot bypass that ingress; depending on the proxy chain, the value may identify a shared proxy rather than an individual client. Optionally set `CLIENT_IP_HEADER` to a single-IP header that your trusted ingress overwrites, and block direct access that could spoof it. A configured but missing or invalid value, or a request without a valid default XFF value, maps to one `unknown` bucket. Neither source is an identity or authorization signal. Use an external rate-limit store for global quotas across instances. The 100 MiB GitHub limit reflects GitHub's regular repository file limit, not a generic transfer or browser request-body limit. See [GitHub's large-file documentation](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github) and [Google Drive's upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads).
+The server allows at most one active GitHub transfer and two active transfers for each built-in chunked provider (Google Drive, OneDrive, and Dropbox) per Node process; an operator-installed plugin defaults to one active transfer unless its adapter is extended with a coordinated limit. Excess requests receive `503` with `Retry-After`.  These are per-process limits, so also set service concurrency and maximum instances when deploying multiple containers. The in-memory rate limiter is likewise per process and bounded to 5,000 recent keys. By default it uses the rightmost syntactically valid `X-Forwarded-For` address as a best-effort bucket. This is trustworthy only when your ingress controls or appends the header and direct access cannot bypass that ingress; depending on the proxy chain, the value may identify a shared proxy rather than an individual client. Optionally set `CLIENT_IP_HEADER` to a single-IP header that your trusted ingress overwrites, and block direct access that could spoof it. A configured but missing or invalid value, or a request without a valid default XFF value, maps to one `unknown` bucket. Neither source is an identity or authorization signal. Use an external rate-limit store for global quotas across instances. The 100 MiB GitHub limit reflects GitHub's regular repository file limit, not a generic transfer or browser request-body limit. See [GitHub's large-file documentation](https://docs.github.com/en/repositories/working-with-files/managing-large-files/about-large-files-on-github) and [Google Drive's upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads).
 
 ## Run locally
 
@@ -43,8 +45,10 @@ For OAuth, register these callback URLs for the origin where the app runs:
 
 - GitHub: `https://YOUR_HOST/api/auth/github/callback`
 - Google: `https://YOUR_HOST/api/auth/google/callback`
+- Microsoft Entra / OneDrive: `https://YOUR_HOST/api/auth/onedrive/callback`
+- Dropbox: `https://YOUR_HOST/api/auth/dropbox/callback`
 
-Use `http://localhost:3000` for local development. Google OAuth uses the narrow `drive.file` scope. The GitHub OAuth flow uses the existing `repo` scope; the app does not request the `workflow` scope.
+Use `http://localhost:3000` for local development. Google OAuth uses the narrow `drive.file` scope. OneDrive uses delegated `User.Read` and `Files.ReadWrite`; Dropbox requires `account_info.read`, `files.content.write`, and `files.metadata.read` in the app configuration. The GitHub OAuth flow uses the existing `repo` scope; the app does not request the `workflow` scope.
 
 ### Environment
 
@@ -54,6 +58,10 @@ Use `http://localhost:3000` for local development. Google OAuth uses the narrow 
 - `SESSION_SECRET` — unique random secret, at least 32 bytes in production. Generate one with `openssl rand -base64 48`. Production sessions do not fall back to OAuth client secrets or a development key.
 - `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` — optional GitHub OAuth app credentials.
 - `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` — optional Google OAuth web client credentials.
+- `ONEDRIVE_CLIENT_ID`, `ONEDRIVE_CLIENT_SECRET` — optional Microsoft Entra web-app credentials for the OneDrive OAuth flow.
+- `DROPBOX_CLIENT_ID`, `DROPBOX_CLIENT_SECRET` — optional scoped Dropbox OAuth app credentials.
+- `LINK_TO_CLOUD_PROVIDER_MODULES` — optional comma-separated installed CommonJS package names for **trusted operator-installed provider modules**. This is not a browser-uploaded or end-user plugin loader; the deployment operator must include every package in the image and owns its server-code privileges.
+- `RELAY_URL`, `RELAY_SHARED_SECRET` — optional authenticated source-fetch relay. Configure both or neither. The app still owns destination credentials and uploads; only the source-download leg is delegated. Use HTTPS in production and a unique random secret of at least 32 characters.
 
 The session is AES-GCM sealed in an `httpOnly`, `SameSite=Lax` cookie. State-changing JSON routes require same-origin requests and bounded request bodies. Production cookies are marked `Secure`; serve the app over HTTPS. Keep `.env.local` and all deployment secrets out of source control.
 
@@ -96,21 +104,93 @@ gcloud run deploy link-to-cloud \
 
 Use your actual secret names, region, and canonical HTTPS origin; register that same origin's callback URLs with GitHub and Google. If using Cloud Run's generated hostname, deploy once to learn it, then set `APP_ORIGIN` and the OAuth callback URLs to that hostname. Add the GitHub and Google OAuth secrets to `--set-secrets` only when enabling those sign-in methods. `--allow-unauthenticated` is appropriate only when the app itself is meant to be publicly reachable; otherwise require identity at the platform boundary. Restrict maximum instances and concurrency to control spend and memory. See [Cloud Run request timeouts](https://cloud.google.com/run/docs/configuring/request-timeout).
 
-Vercel can run the Node route for transfers that fit the configured function duration. This repository declares `maxDuration = 300` for `/api/transfer`; platform plan limits still apply. Vercel's 4.5 MB function request/response body limit concerns data crossing the function boundary: the file is fetched by the function and is not posted by the browser, so it is not the file-size limit for this app. The invocation-duration and streaming lifecycle are the relevant constraints. See [Vercel Function limits](https://vercel.com/docs/functions/limitations).
+### Vercel
 
-Cloudflare Workers is not a drop-in deployment target: this app uses the Node.js runtime, Node networking/DNS APIs, and PostgreSQL. Porting it would require a runtime/data-layer adaptation and a separate review of Workers' body, subrequest, CPU, and execution limits. Do not treat an edge Worker as an unrestricted raw-file proxy. Railway, Render, Fly.io, and VPS/container hosts can also work when their request timeouts, outbound networking, memory, database access, and bandwidth limits are configured for the workload.
+Vercel can run the Node route for transfers that fit the configured function duration. This repository declares `maxDuration = 300` for `/api/transfer`, so five minutes is this route's current cap unless it is deliberately changed; the selected Vercel plan's limits still apply. Vercel's 4.5 MB function request/response payload limit is not the file-size limit here: the browser sends bounded control data and receives progress events, while the function fetches the source file and uploads it to the destination. Invocation duration—including streamed response time—and the browser/streaming lifecycle still constrain a transfer. See [Vercel Function limits](https://vercel.com/docs/functions/limitations).
+
+### Cloudflare Workers
+
+Cloudflare Workers is not a drop-in deployment target. Workers currently have 128 MB of memory per isolate; the app's possible GitHub buffer and base64 encoding alone need a design review against that budget. Workers' incoming request-body limits are account-plan limits (currently 100 MB on Free and Pro, 200 MB on Business, and up to 5 GB on Enterprise), but they do not describe this app's source-file size: the browser sends only control data and the server fetches the source file outbound. HTTP Workers have no hard wall-clock limit while the client stays connected, but client disconnects, CPU limits (10 ms on Free; paid plans default to 30 seconds and can be configured up to five minutes), subrequests, and streaming behavior still matter.
+
+A port must preserve the current SSRF protections and data model. This implementation resolves DNS with Node APIs, uses an Undici dispatcher pinned to a validated address for outbound requests, and uses PostgreSQL. It would require a deliberately designed Workers-compatible DNS/connection-pinning strategy and PostgreSQL connection approach—not merely a build-target change. See [Workers limits](https://developers.cloudflare.com/workers/platform/limits/); do not treat an edge Worker as an unrestricted raw-file proxy.
+
+### AWS Lambda and other hosts
+
+A regular synchronous AWS Lambda invocation has a maximum configured timeout of 900 seconds (15 minutes), so it is still a request-bound deployment rather than a durable transfer worker. The app does not use Lambda's `/tmp` storage (which AWS configures from 512 MB to 10,240 MB), and it does not rely on staging a file there. A Lambda deployment would need a suitable Next.js adapter, tested response streaming and cancellation through the chosen ingress, and a PostgreSQL connection strategy; validate the specific runtime and proxy instead of assuming Node streaming carries over unchanged. See [Lambda timeouts](https://docs.aws.amazon.com/lambda/latest/dg/configuration-timeout.html) and [Lambda ephemeral storage](https://docs.aws.amazon.com/lambda/latest/dg/configuration-ephemeral-storage.html).
+
+Railway, Render, Fly.io, and VPS/container hosts can also work when their ingress timeouts, outbound networking, memory, database access, and bandwidth/egress pricing are configured and tested for the workload. None should be assumed to provide unlimited request time or free bandwidth.
 
 ## Provider adapters
 
-The server has a provider registry (`src/lib/providers/registry.ts`) with working GitHub and Google Drive adapters. `GET /api/providers` exposes their public descriptors, and the destination selector uses that registry rather than maintaining a second list of labels. Provider-specific OAuth routes and destination forms remain explicit because authentication scopes, folder/repository semantics, and upload protocols differ.
+The server has built-in adapters for GitHub, Google Drive, OneDrive, and Dropbox in `src/lib/providers/registry.ts`. `GET /api/providers` exposes their public descriptors, and the destination selector uses that registry rather than maintaining a second list of labels. Provider-specific OAuth routes and destination forms remain explicit because authentication scopes, folder/repository semantics, and upload protocols differ.
 
-To add a real destination, implement its credential resolution and complete streaming upload adapter, register it, extend the request validator and provider-specific UI/account flow, and add unit/integration tests. No OneDrive, Dropbox, S3, or Rclone adapter is registered or implied; choose and configure the first additional provider before implementing one.
+### Operator-installed provider modules
 
-## GitHub Actions relay and desktop installers
+A deployment operator can extend the registry with a **trusted Node.js provider module** by installing a CommonJS package in the deployed image and setting `LINK_TO_CLOUD_PROVIDER_MODULES` to its comma-separated package name(s). A module exports either `provider`, `providers`, or a default adapter implementing `StorageProvider` from `src/lib/providers/types.ts`. Plugins use a namespaced transfer target such as `plugin:acme-webdav`, receive a bounded `{ destination: ... }` object that their `validateDestination` method must validate, and can expose declarative text fields through `destinationFields` for the generic UI. See [`docs/provider-plugins.md`](docs/provider-plugins.md).
 
-The GitHub Actions relay described in the proposal is deliberately **not implemented**. The current OAuth scope is not broadened, no user-controlled workflow dispatch endpoint is exposed, and no arbitrary file-transfer workflow is shipped. GitHub's current [Actions terms](https://docs.github.com/en/site-policy/github-terms/github-terms-for-additional-products-and-features) say GitHub-hosted runners must not be used for activity unrelated to production, testing, deployment, or publication of the associated software project. A general-purpose transfer relay is unrelated work and creates token/secret exposure and account-enforcement risks. Use a permitted long-running container/VPS or a purpose-built transfer service instead.
+This is deliberately an **operator-installed** plugin boundary, not a runtime marketplace or browser upload endpoint: allowing a signed-in user to choose a package or submit adapter code would be arbitrary code execution on the application server. A production plugin still needs a stable provider ID and request schema, strict validation, credential resolution, account/OAuth flow where needed, destination UI, a bounded upload adapter, cancellation behavior, and unit/integration tests. Its package and dependencies must be present in the container image before startup.
 
-This repository is a web app, not an Electron/Tauri desktop app. It has no desktop runtime, installer configuration, local PostgreSQL bundle, or installer signing/release process. Therefore there is no tag-triggered installer workflow; running a wrapped local server would again route file traffic through the user's own internet connection. Add desktop packaging only as a separate product decision with a complete runtime and distribution design—the sample `electron-builder` invocation alone cannot produce valid installers here.
+Rclone is not bundled or spawned. Supporting it would require isolated credentials/configuration, restricted remotes and operations, subprocess lifecycle/cancellation controls, packaging, and backend tests. A command that first downloads a file to `/tmp` before invoking Rclone stages the complete file, so it is neither disk-free nor streaming.
+
+## External source relays
+
+The application can optionally delegate the **source-download leg** to an authenticated relay while keeping OAuth credentials, destination uploads, transfer history, and UI control in the main Next.js service. This is useful when the app host has restrictive egress, short source-fetch limits, or you want a separate network path.
+
+The relay protocol is intentionally small:
+
+- the app POSTs bounded JSON to `/relay` with the source URL, `GET`/`HEAD`, and the already-validated optional source header;
+- the relay requires `Authorization: Bearer <RELAY_SHARED_SECRET>`;
+- redirects are followed manually so source credentials are not forwarded across origins;
+- response bytes are streamed back to the app and are never staged on disk;
+- the relay returns the final source URL in `X-Link-To-Cloud-Final-Url`, which keeps filename inference and history behavior consistent.
+
+Set the same secret in the app and relay platform, then point `RELAY_URL` at the deployed HTTPS `/relay` endpoint. Direct source fetching remains the default when relay variables are unset.
+
+### Cloudflare Worker relay
+
+`relay/cloudflare/worker.mjs` is a streaming Worker implementation with `global_fetch_strictly_public` enabled in `relay/cloudflare/wrangler.jsonc`. It rejects literal IPs and local/private-style hostnames before fetches, uses manual redirects, and relies on Cloudflare's strict-public fetch mode to prevent requests to private IP space. Do not add VPC/private-network bindings to this relay.
+
+Deploy manually with Wrangler or use the `Deploy source relays` workflow. Store `RELAY_SHARED_SECRET` as a Worker secret, never as a plaintext `vars` value.
+
+### Netlify Function relay
+
+`netlify/functions/relay.mjs` reuses this repository's DNS-pinned `safeFetch` path with relay recursion explicitly disabled. That preserves the Node implementation's private/special-address rejection and DNS pinning.
+
+Netlify's streamed synchronous Function response is limited to 20 MB and has a short execution window, so this relay is intentionally a **small-file relay**. It rejects known source lengths above 20 MB. For GET transfers it also rejects unknown/untrustworthy lengths instead of risking a platform-truncated body being mistaken for a successful EOF. Use Cloudflare or the GitHub self-hosted worker relay for larger or unknown-length sources.
+
+### GitHub self-hosted worker relay
+
+`relay/github/worker.mjs` is a persistent Node relay deployed onto a Linux GitHub Actions **self-hosted runner**. GitHub Actions is the deployment/control plane; the byte-serving process runs in Docker on infrastructure you control. This preserves the same synchronous authenticated `/relay` contract without turning a GitHub-hosted runner into a CDN/serverless application.
+
+The GitHub worker performs public-address DNS validation and pins those validated addresses into the outbound socket lookup, preventing DNS rebinding between validation and connection. Redirects are manual, caller source headers are limited to the first origin, `Accept-Encoding` is forced to `identity`, and response bodies are streamed without file staging.
+
+The deployment uses:
+
+- `relay/github/Dockerfile` for the read-only worker container;
+- `relay/github/compose.yml` for worker hardening and persistent Caddy TLS;
+- `relay/github/Caddyfile` for the public HTTPS reverse proxy;
+- a self-hosted runner labeled `self-hosted`, `linux`, and `link-to-cloud-relay`;
+- repository variable `GITHUB_RELAY_DOMAIN` pointing at that runner host.
+
+See `docs/github-worker-relay.md` for host prerequisites, deployment, validation, and rollback.
+
+GitHub-hosted runners are deliberately not used as the live relay runtime. GitHub's Actions terms prohibit using Actions as a content delivery network or as part of a serverless application; the self-hosted deployment model keeps Actions scoped to deployment and verification.
+
+Required repository secrets for `.github/workflows/deploy-relays.yml`:
+
+- `RELAY_SHARED_SECRET` — the same 32+ character random value configured in the main app;
+- Cloudflare: `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`;
+- Netlify: `NETLIFY_AUTH_TOKEN`, `NETLIFY_SITE_ID`.
+
+Required repository variable for the GitHub worker:
+
+- `GITHUB_RELAY_DOMAIN` — public DNS hostname only, for example `relay.example.com`.
+
+For Netlify, the workflow stores `RELAY_SHARED_SECRET` as a production Functions secret before deployment. Cloudflare uploads it alongside the Worker deployment using Wrangler's secrets file support. The GitHub self-hosted job writes the secret to an owner-only file on the runner host and mounts it into the worker as a Docker secret.
+
+## Desktop installers
+
+This repository is a web app, not an Electron/Tauri desktop app. It has no desktop runtime, installer configuration, local PostgreSQL bundle, or installer signing/release process. Add desktop packaging only as a separate product decision with a complete runtime and distribution design.
 
 ## Validation
 
@@ -121,4 +201,4 @@ npm test
 npm run build
 ```
 
-The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, GitHub skip behavior and bounded buffering, Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, upload-session URL validation, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. The CI workflow runs the checks on pushes and pull requests and builds the production container image.
+The tests cover strict transfer-request validation and bounded/timed JSON bodies, same-origin configuration, bounded rate-limit state and trusted client-IP header selection, provider-profile identity and refresh-token continuity, token revocation without URL leakage, SSRF address filtering, provider registration/capacity and creation events, authenticated relay routing/fail-closed configuration, bounded relay control bodies, source encoding invariants, GitHub skip behavior and bounded buffering, Google Drive chunk boundaries, unknown and zero-byte sources, content-length mismatches, resumable recovery after an interrupted chunk, OneDrive trusted upload-session URLs/byte ranges and known-length requirement, Dropbox upload-session commits/conflict behavior, source-body idle timeout/cancellation/no-prefetch behavior, and source-link cap/removal reporting. CI syntax-checks all relay runtimes, dry-runs the Cloudflare bundle, and builds/starts the GitHub relay container before the application production/container builds.

@@ -42,3 +42,39 @@ export function refreshTokenForIdentity(
   if (!previous?.refresh || !previous.sub || previous.sub !== next.sub) return undefined;
   return previous.refresh;
 }
+
+export type OneDriveProfile = { id: string; name: string };
+
+export function parseOneDriveProfile(value: unknown): OneDriveProfile | null {
+  if (!isRecord(value)) return null;
+  const { id, displayName, userPrincipalName } = value;
+  if (typeof id !== "string" || !id.trim() || id.length > 255 || /[\u0000-\u001f\u007f]/.test(id)) return null;
+  const name = typeof displayName === "string" && displayName.trim() ? displayName.trim() : userPrincipalName;
+  if (typeof name !== "string" || !name.trim() || name.length > 320 || /[\u0000-\u001f\u007f]/.test(name)) return null;
+  return { id: id.trim(), name: name.trim() };
+}
+
+export type DropboxProfile = { accountId: string; name: string };
+
+export function parseDropboxProfile(value: unknown): DropboxProfile | null {
+  if (!isRecord(value)) return null;
+  const { account_id: accountId, name } = value;
+  const displayName = isRecord(name) ? name.display_name : undefined;
+  if (
+    typeof accountId !== "string" || !accountId.trim() || accountId.length > 255 || /[\u0000-\u001f\u007f]/.test(accountId) ||
+    typeof displayName !== "string" || !displayName.trim() || displayName.length > 320 || /[\u0000-\u001f\u007f]/.test(displayName)
+  ) {
+    return null;
+  }
+  return { accountId: accountId.trim(), name: displayName.trim() };
+}
+
+/** Reuse a refresh token only when the provider returned the same stable account identifier. */
+export function refreshTokenForStableId(
+  newToken: string | undefined,
+  previous: { refresh?: string; id: string } | undefined,
+  id: string,
+): string | undefined {
+  if (newToken?.trim()) return newToken;
+  return previous?.refresh && previous.id === id ? previous.refresh : undefined;
+}

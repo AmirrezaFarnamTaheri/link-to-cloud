@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { HttpError } from "../src/lib/net";
+import { registerProvider } from "../src/lib/providers/registry";
 import { MAX_TRANSFER_REQUEST_BYTES, readTransferRequest, validateTransferRequest } from "../src/lib/transfer-request";
 
 const base = { url: "https://downloads.example/file.zip" };
@@ -15,9 +17,43 @@ test("valid GitHub and Drive request shapes are parsed as discriminated targets"
   const drive = validateTransferRequest({ ...base, target: "drive", folderId: "folder_123-" });
 
   assert.equal(github.target, "github");
-  assert.equal(github.repo, "owner/repository");
+  if (github.target === "github") assert.equal(github.repo, "owner/repository");
   assert.equal(drive.target, "drive");
-  assert.equal(drive.folderId, "folder_123-");
+  if (drive.target === "drive") assert.equal(drive.folderId, "folder_123-");
+});
+
+test("OneDrive and Dropbox accept only relative destination paths", () => {
+  const oneDrive = validateTransferRequest({ ...base, target: "onedrive", path: "exports/2026", ifExists: "overwrite" });
+  const dropbox = validateTransferRequest({ ...base, target: "dropbox", path: "exports/2026", ifExists: "skip" });
+  assert.deepEqual(oneDrive, { ...base, target: "onedrive", path: "exports/2026", ifExists: "overwrite" });
+  assert.deepEqual(dropbox, { ...base, target: "dropbox", path: "exports/2026", ifExists: "skip" });
+  assert.throws(() => validateTransferRequest({ ...base, target: "onedrive", path: "safe/../private" }), /destination folder path/i);
+  assert.throws(() => validateTransferRequest({ ...base, target: "dropbox", path: ".." }), /destination folder path/i);
+  assert.throws(() => validateTransferRequest({ ...base, target: "onedrive", ifExists: "merge" }), /ifExists/i);
+  assert.throws(() => validateTransferRequest({ ...base, target: "dropbox", ifExists: "merge" }), /ifExists/i);
+});
+
+test("operator plugins use a namespaced target and a provider-owned destination schema", () => {
+  registerProvider({
+    id: "test-plugin",
+    displayName: "Test Plugin",
+    icon: "cloud",
+    maxFileBytes: null,
+    uploadMode: "chunked-stream",
+    destinationFields: [{ key: "bucket", label: "Bucket", required: true }],
+    validateDestination(value) {
+      if (typeof value.bucket !== "string" || !/^[a-z0-9-]{3,63}$/.test(value.bucket)) throw new HttpError("invalid bucket");
+      return { bucket: value.bucket };
+    },
+    async resolveCredentials() { return null; },
+    async uploadFile() { throw new Error("not reached"); },
+  });
+  assert.deepEqual(
+    validateTransferRequest({ ...base, target: "plugin:test-plugin", destination: { bucket: "public-files" } }),
+    { ...base, target: "plugin:test-plugin", destination: { bucket: "public-files" } },
+  );
+  assert.throws(() => validateTransferRequest({ ...base, target: "plugin:test-plugin", destination: { bucket: "../bad" } }), /invalid bucket/i);
+  assert.throws(() => validateTransferRequest({ ...base, target: "test-plugin", destination: { bucket: "public-files" } }), /supported destination/i);
 });
 
 test("request schemas reject unknown fields and provider-field mixups", () => {

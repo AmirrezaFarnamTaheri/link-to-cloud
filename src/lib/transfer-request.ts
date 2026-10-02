@@ -1,11 +1,21 @@
 import { HttpError } from "@/lib/net";
+import { getProvider } from "@/lib/providers/registry";
 import { readJsonRequest } from "@/lib/http";
-import type { DriveTransferRequest, GitHubTransferRequest, TransferRequest } from "@/lib/types";
+import type {
+  DropboxTransferRequest,
+  DriveTransferRequest,
+  GitHubTransferRequest,
+  OneDriveTransferRequest,
+  PluginTarget,
+  PluginTransferRequest,
+  TransferRequest,
+} from "@/lib/types";
 
 export const MAX_TRANSFER_REQUEST_BYTES = 16 * 1024;
 const REPO_RE = /^[\w.-]+\/[\w.-]+$/;
 const REPO_NAME_RE = /^[\w.-]{1,100}$/;
 const DRIVE_FOLDER_ID_RE = /^[A-Za-z0-9_-]{1,256}$/;
+const PROVIDER_ID_RE = /^[a-z][a-z0-9-]{1,62}$/;
 const CONTROL_CHARS_RE = /[\u0000-\u001f\u007f]/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -58,6 +68,27 @@ function parseBase(value: Record<string, unknown>) {
   };
 }
 
+/** A relative destination directory, never an absolute OS path. */
+function parseDestinationPath(value: Record<string, unknown>, key = "path"): string | undefined {
+  const raw = optionalString(value, key, 1024)?.trim();
+  if (!raw) return undefined;
+  const clean = raw.replace(/^\/+|\/+$/g, "");
+  const segments = clean.split("/");
+  if (!clean || segments.some((part) => !part || part === "." || part === ".." || part.length > 255 || part.includes("\\"))) {
+    throw new HttpError("Invalid destination folder path");
+  }
+  return clean;
+}
+
+function parseIfExists(value: Record<string, unknown>): "overwrite" | "rename" | "skip" | undefined {
+  const ifExists = value.ifExists;
+  if (ifExists === undefined) return undefined;
+  if (ifExists !== "overwrite" && ifExists !== "rename" && ifExists !== "skip") {
+    throw new HttpError("ifExists must be overwrite, rename, or skip");
+  }
+  return ifExists;
+}
+
 function parseGitHub(value: Record<string, unknown>): GitHubTransferRequest {
   rejectUnknownKeys(
     value,
@@ -99,10 +130,7 @@ function parseGitHub(value: Record<string, unknown>): GitHubTransferRequest {
     }
   }
   const message = optionalString(value, "message", 200)?.trim();
-  const ifExists = value.ifExists;
-  if (ifExists !== undefined && ifExists !== "overwrite" && ifExists !== "rename" && ifExists !== "skip") {
-    throw new HttpError("ifExists must be overwrite, rename, or skip");
-  }
+  const ifExists = parseIfExists(value);
 
   return {
     ...base,
@@ -132,11 +160,38 @@ function parseDrive(value: Record<string, unknown>): DriveTransferRequest {
   };
 }
 
+function parseOneDrive(value: Record<string, unknown>): OneDriveTransferRequest {
+  rejectUnknownKeys(value, ["url", "target", "filename", "header", "path", "ifExists"], "request");
+  const path = parseDestinationPath(value);
+  const ifExists = parseIfExists(value);
+  return { ...parseBase(value), target: "onedrive", ...(path ? { path } : {}), ...(ifExists ? { ifExists } : {}) };
+}
+
+function parseDropbox(value: Record<string, unknown>): DropboxTransferRequest {
+  rejectUnknownKeys(value, ["url", "target", "filename", "header", "path", "ifExists"], "request");
+  const path = parseDestinationPath(value);
+  const ifExists = parseIfExists(value);
+  return { ...parseBase(value), target: "dropbox", ...(path ? { path } : {}), ...(ifExists ? { ifExists } : {}) };
+}
+
+function parsePlugin(value: Record<string, unknown>, target: string): PluginTransferRequest {
+  const providerId = target.slice("plugin:".length);
+  if (!PROVIDER_ID_RE.test(providerId)) throw new HttpError("Invalid plugin destination");
+  const provider = getProvider(providerId);
+  if (!provider?.validateDestination) throw new HttpError("Unsupported destination");
+  rejectUnknownKeys(value, ["url", "target", "filename", "header", "destination"], "request");
+  if (!isRecord(value.destination)) throw new HttpError("destination must be an object");
+  return { ...parseBase(value), target: target as PluginTarget, destination: provider.validateDestination(value.destination) };
+}
+
 export function validateTransferRequest(input: unknown): TransferRequest {
   if (!isRecord(input)) throw new HttpError("Request body must be a JSON object");
   if (input.target === "github") return parseGitHub(input);
   if (input.target === "drive") return parseDrive(input);
-  throw new HttpError("target must be github or drive");
+  if (input.target === "onedrive") return parseOneDrive(input);
+  if (input.target === "dropbox") return parseDropbox(input);
+  if (typeof input.target === "string" && input.target.startsWith("plugin:")) return parsePlugin(input, input.target);
+  throw new HttpError("target must name a supported destination");
 }
 
 /** Read and validate a small JSON control message without trusting Content-Length. */
