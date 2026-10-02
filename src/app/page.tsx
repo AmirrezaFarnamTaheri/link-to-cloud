@@ -12,11 +12,11 @@ export default function HomePage() {
           <span className="text-lg font-semibold tracking-tight">Relay</span>
         </div>
         <h1 className="text-balance text-4xl font-semibold leading-[1.1] tracking-tight sm:text-5xl">
-          Send any link{" "}
+          Send download links{" "}
           <span className="bg-gradient-to-r from-indigo-300 to-cyan-300 bg-clip-text text-transparent">straight to the cloud.</span>
         </h1>
         <p className="mt-4 text-pretty text-base leading-relaxed text-slate-400">
-          Paste download links and Relay transfers files from the source to GitHub or Google Drive on the server, with live progress and checksums. Your browser never downloads the file contents; a localhost server uses your computer’s internet connection.
+          Paste HTTP download links and Relay transfers files from the source to GitHub or Google Drive on the server, with live progress and SHA-256 checksums for uploads. Your browser never downloads the file contents; a localhost server uses your computer’s internet connection.
         </p>
       </header>
       <RelayApp />

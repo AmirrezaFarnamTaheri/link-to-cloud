@@ -1,4 +1,5 @@
 import { HttpError } from "@/lib/net";
+import { readJsonRequest } from "@/lib/http";
 import type { DriveTransferRequest, GitHubTransferRequest, TransferRequest } from "@/lib/types";
 
 export const MAX_TRANSFER_REQUEST_BYTES = 16 * 1024;
@@ -140,42 +141,6 @@ export function validateTransferRequest(input: unknown): TransferRequest {
 
 /** Read and validate a small JSON control message without trusting Content-Length. */
 export async function readTransferRequest(req: Request): Promise<TransferRequest> {
-  const declaredLength = Number(req.headers.get("content-length"));
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_TRANSFER_REQUEST_BYTES) {
-    throw new HttpError("Transfer request is too large", 413);
-  }
-  if (!req.body) throw new HttpError("Request body is required");
-
-  const reader = req.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let total = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_TRANSFER_REQUEST_BYTES) {
-        await reader.cancel().catch(() => {});
-        throw new HttpError("Transfer request is too large", 413);
-      }
-      chunks.push(value);
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  let text: string;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks, total));
-  } catch {
-    throw new HttpError("Request body must be valid UTF-8 JSON");
-  }
-
-  let value: unknown;
-  try {
-    value = JSON.parse(text) as unknown;
-  } catch {
-    throw new HttpError("Request body must be valid JSON");
-  }
+  const value = await readJsonRequest(req, MAX_TRANSFER_REQUEST_BYTES, "Transfer request");
   return validateTransferRequest(value);
 }

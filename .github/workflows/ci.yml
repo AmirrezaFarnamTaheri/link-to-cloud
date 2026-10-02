@@ -26,9 +26,11 @@ jobs:
         run: npm run typecheck
       - name: Unit tests
         run: npm test
-      - name: Audit production dependencies
-        run: npm audit --omit=dev
+      - name: Audit dependencies
+        run: npm audit
       - name: Production build
         run: npm run build
         env:
           DATABASE_URL: postgresql://build:build@127.0.0.1:5432/build
+      - name: Verify container image
+        run: docker build --tag link-to-cloud:ci .

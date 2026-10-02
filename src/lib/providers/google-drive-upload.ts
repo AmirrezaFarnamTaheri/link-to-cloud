@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { HttpError } from "@/lib/net";
 import type { TransferEvent } from "@/lib/types";
+import { withTimeout } from "@/lib/timeouts";
 import { abortableSleep, progressEmitter } from "./shared";
 
 export const DRIVE_CHUNK_SIZE = 8 * 1024 * 1024;
@@ -166,7 +167,7 @@ async function queryUploadStatus(
       },
       body: new Uint8Array(),
       redirect: "manual",
-      signal,
+      signal: withTimeout(signal, 15_000),
     });
   } catch {
     if (signal.aborted) throw new HttpError("Cancelled", 499);
@@ -229,7 +230,13 @@ async function uploadChunk({
 
     let response: Response;
     try {
-      response = await fetcher(sessionUrl, { method: "PUT", headers, body: body as unknown as BodyInit, redirect: "manual", signal });
+      response = await fetcher(sessionUrl, {
+        method: "PUT",
+        headers,
+        body: body as unknown as BodyInit,
+        redirect: "manual",
+        signal: withTimeout(signal, 120_000),
+      });
     } catch {
       if (signal.aborted) throw new HttpError("Cancelled", 499);
       const status = await queryUploadStatus(sessionUrl, final ? start + chunk.byteLength : expectedSize, signal, fetcher);

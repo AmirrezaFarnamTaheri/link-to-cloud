@@ -1,5 +1,7 @@
 import { getGoogleAuth } from "@/lib/google";
 import { HttpError, mimeOf } from "@/lib/net";
+import { googleOwner } from "@/lib/owners";
+import { withTimeout } from "@/lib/timeouts";
 import type { Session } from "@/lib/session";
 import type { StorageProvider } from "./types";
 import { uploadResumableStream } from "./google-drive-upload";
@@ -14,8 +16,9 @@ export const googleDriveProvider: StorageProvider = {
   async resolveCredentials(session: Session) {
     if (!session.google) return null;
     const google = await getGoogleAuth();
-    if (!google) return null;
-    return { accessToken: google.token, owner: `google:${google.email}` };
+    const owner = google && googleOwner(google);
+    if (!google || !owner) return null;
+    return { accessToken: google.token, owner };
   },
 
   async uploadFile(context, credentials) {
@@ -37,7 +40,7 @@ export const googleDriveProvider: StorageProvider = {
           name: request.newFolder,
           mimeType: "application/vnd.google-apps.folder",
         }),
-        signal,
+        signal: withTimeout(signal, 15_000),
       });
       const folder = (await folderResponse.json().catch(() => ({}))) as {
         id?: string;
@@ -53,6 +56,7 @@ export const googleDriveProvider: StorageProvider = {
       }
       folderId = folder.id;
       folderName = folder.name ?? request.newFolder;
+      emit({ type: "destination-created", target: "drive", folderId });
     }
 
     const mime = mimeOf(source);
@@ -67,7 +71,7 @@ export const googleDriveProvider: StorageProvider = {
           ...(size !== null ? { "X-Upload-Content-Length": String(size) } : {}),
         },
         body: JSON.stringify({ name, ...(folderId ? { parents: [folderId] } : {}) }),
-        signal,
+        signal: withTimeout(signal, 15_000),
       },
     );
     const sessionUrl = initResponse.headers.get("location");

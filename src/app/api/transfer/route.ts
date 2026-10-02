@@ -4,7 +4,7 @@ import { getProvider } from "@/lib/providers/registry";
 import { acquireTransferSlot } from "@/lib/providers/slots";
 import type { ProviderCredentials, ProviderTransferContext } from "@/lib/providers/types";
 import { allow } from "@/lib/ratelimit";
-import { clientIp, getSession } from "@/lib/session";
+import { clientIp, getSession, isSameOriginRequest } from "@/lib/session";
 import { readTransferRequest } from "@/lib/transfer-request";
 import type { TransferEvent, TransferRequest } from "@/lib/types";
 
@@ -13,10 +13,11 @@ export const runtime = "nodejs";
 export const maxDuration = 300;
 
 function jsonError(error: string, status: number) {
-  return Response.json({ type: "error", error }, { status });
+  return Response.json({ type: "error", error }, { status, headers: { "Cache-Control": "no-store" } });
 }
 
 export async function POST(req: Request) {
+  if (!isSameOriginRequest(req)) return jsonError("Cross-origin request rejected", 403);
   if (!allow(`transfer:${clientIp(req)}`, 60, 10 * 60_000)) {
     return jsonError("Too many transfers — try again in a few minutes", 429);
   }
@@ -45,7 +46,7 @@ export async function POST(req: Request) {
   if (!releaseSlot) {
     return Response.json(
       { type: "error", error: `${provider.displayName} is at transfer capacity; retry shortly` },
-      { status: 503, headers: { "Retry-After": "5" } },
+      { status: 503, headers: { "Retry-After": "5", "Cache-Control": "no-store" } },
     );
   }
 

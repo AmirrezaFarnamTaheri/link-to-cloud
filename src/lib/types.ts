@@ -26,8 +26,8 @@ export type InspectResult =
 export type TransferDone = {
   name: string;
   url: string;
-  bytes: number;
-  sha256: string;
+  bytes: number | null;
+  sha256: string | null;
   location: string;
   durationMs: number;
   skipped?: boolean;
@@ -38,6 +38,8 @@ export type TransferDone = {
 export type TransferEvent =
   | { type: "start"; name: string; size: number | null; mime: string }
   | { type: "phase"; phase: "connecting" | "creating-repo" | "creating-folder" | "committing" | "uploading" }
+  | { type: "destination-created"; target: "github"; repo: string }
+  | { type: "destination-created"; target: "drive"; folderId: string }
   | { type: "progress"; phase: "download" | "upload"; bytes: number; total: number | null }
   | ({ type: "done" } & TransferDone)
   | { type: "error"; error: string };

@@ -46,11 +46,18 @@ test("streamed JSON bodies are capped even when Content-Length is absent", async
   await assert.rejects(readTransferRequest(request), /too large/i);
 });
 
-test("malformed JSON produces a deterministic client error", async () => {
-  const request = new Request("https://relay.example/api/transfer", {
+test("malformed JSON and non-JSON media types produce deterministic client errors", async () => {
+  const malformed = new Request("https://relay.example/api/transfer", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: "{invalid",
   });
-  await assert.rejects(readTransferRequest(request), /valid json/i);
+  await assert.rejects(readTransferRequest(malformed), /valid json/i);
+
+  const plainText = new Request("https://relay.example/api/transfer", {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ url: "https://files.example/file.zip", target: "drive" }),
+  });
+  await assert.rejects(readTransferRequest(plainText), /application\/json/i);
 });

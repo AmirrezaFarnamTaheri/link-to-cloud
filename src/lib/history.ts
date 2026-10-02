@@ -5,7 +5,7 @@ import { sql } from "drizzle-orm";
 
 let ready: Promise<void> | null = null;
 
-/** Idempotent safety net so history works even on a database that was never `drizzle-kit push`ed. */
+/** Create the history table and index idempotently for a fresh database. */
 function ensureTable() {
   ready ??= db
     .execute(

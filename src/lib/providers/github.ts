@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { ghHeaders, encodePath, REPO_RE } from "@/lib/github";
 import { HttpError } from "@/lib/net";
+import { githubOwner } from "@/lib/owners";
 import type { Session } from "@/lib/session";
+import { withTimeout } from "@/lib/timeouts";
 import { GITHUB_MAX_BYTES } from "@/lib/types";
 import type { StorageProvider } from "./types";
 import { abortableSleep, progressEmitter, readAll, splitExtension } from "./shared";
@@ -15,7 +17,9 @@ export const githubProvider: StorageProvider = {
 
   async resolveCredentials(session: Session) {
     if (!session.github) return null;
-    return { accessToken: session.github.token, owner: `github:${session.github.login}` };
+    const owner = githubOwner(session.github);
+    if (!owner) return null;
+    return { accessToken: session.github.token, owner };
   },
 
   async uploadFile(context, credentials) {
@@ -41,7 +45,7 @@ export const githubProvider: StorageProvider = {
           description: request.newRepo.description || undefined,
           auto_init: true,
         }),
-        signal,
+        signal: withTimeout(signal, 15_000),
       });
       const body = (await response.json().catch(() => ({}))) as {
         full_name?: string;
@@ -56,16 +60,12 @@ export const githubProvider: StorageProvider = {
         );
       }
       repo = body.full_name;
+      emit({ type: "destination-created", target: "github", repo });
       await abortableSleep(1500, signal);
     }
     if (!repo || !REPO_RE.test(repo) || repo.split("/").some((part) => part === "." || part === "..")) {
       throw new HttpError("Choose or create a repository");
     }
-
-    const downloadProgress = progressEmitter(emit, "download", size);
-    const data = await readAll(source, GITHUB_MAX_BYTES, downloadProgress, signal);
-    downloadProgress(data.byteLength, true);
-    const sha256 = createHash("sha256").update(data).digest("hex");
 
     const directory = (request.path ?? "").replace(/^\/+|\/+$/g, "");
     const branch = request.branch?.trim() || undefined;
@@ -80,7 +80,7 @@ export const githubProvider: StorageProvider = {
     for (let index = 0; index <= 50; index++) {
       const existing = await fetch(apiFor(name) + refQuery, {
         headers: ghHeaders(credentials.accessToken),
-        signal,
+        signal: withTimeout(signal, 10_000),
       });
       if (existing.status === 404) {
         await existing.body?.cancel().catch(() => {});
@@ -92,13 +92,14 @@ export const githubProvider: StorageProvider = {
         throw new HttpError(`GitHub could not check the destination file (HTTP ${existing.status})`, 502);
       }
       const body = (await existing.json()) as { sha?: string; html_url?: string } | unknown[];
-      if (Array.isArray(body)) throw new HttpError(`"${name}" is a folder in that repository`);
+      if (Array.isArray(body)) throw new HttpError(`\"${name}\" is a folder in that repository`);
       if (mode === "skip") {
+        await source.body?.cancel().catch(() => {});
         return {
           name,
           url: body.html_url ?? `https://github.com/${repo}`,
-          bytes: data.byteLength,
-          sha256,
+          bytes: size,
+          sha256: null,
           location: `${repo}/${directory ? `${directory}/` : ""}${name}`,
           durationMs: Date.now() - t0,
           skipped: true,
@@ -116,6 +117,11 @@ export const githubProvider: StorageProvider = {
     }
     if (!candidateAvailable) throw new HttpError("Could not find an unused filename after 51 candidates", 409);
 
+    const downloadProgress = progressEmitter(emit, "download", size);
+    const data = await readAll(source, GITHUB_MAX_BYTES, downloadProgress, signal, size);
+    downloadProgress(data.byteLength, true);
+    const sha256 = createHash("sha256").update(data).digest("hex");
+
     emit({ type: "phase", phase: "committing" });
     const message = (request.message?.trim() || `Add ${name}`).slice(0, 200);
     const body = JSON.stringify({
@@ -131,7 +137,7 @@ export const githubProvider: StorageProvider = {
         method: "PUT",
         headers: ghHeaders(credentials.accessToken),
         body,
-        signal,
+        signal: withTimeout(signal, 240_000),
       });
       const shouldRetry = response.status === 409 || (response.status === 404 && created);
       if (!shouldRetry) break;

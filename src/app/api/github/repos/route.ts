@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { ghHeaders } from "@/lib/github";
 import { getSession } from "@/lib/session";
+import { withTimeout } from "@/lib/timeouts";
 import type { Repo } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -12,12 +13,18 @@ export async function GET() {
   if (!s.github) return NextResponse.json({ error: "Not logged in to GitHub" }, { status: 401 });
   const out: Repo[] = [];
   for (let page = 1; page <= 3; page++) {
-    const r = await fetch(
-      `https://api.github.com/user/repos?per_page=100&page=${page}&sort=pushed&affiliation=owner,collaborator,organization_member`,
-      { headers: ghHeaders(s.github.token) },
-    );
+    let r: Response;
+    try {
+      r = await fetch(
+        `https://api.github.com/user/repos?per_page=100&page=${page}&sort=pushed&affiliation=owner,collaborator,organization_member`,
+        { headers: ghHeaders(s.github.token), signal: withTimeout(undefined, 10_000) },
+      );
+    } catch {
+      if (page === 1) return NextResponse.json({ error: "Could not reach GitHub" }, { status: 502, headers: { "Cache-Control": "no-store" } });
+      break;
+    }
     if (!r.ok) {
-      if (page === 1) return NextResponse.json({ error: "Failed to list repos" }, { status: r.status });
+      if (page === 1) return NextResponse.json({ error: "Failed to list repos" }, { status: r.status, headers: { "Cache-Control": "no-store" } });
       break;
     }
     const batch = (await r.json()) as GhRepo[];
@@ -27,5 +34,5 @@ export async function GET() {
     }
     if (batch.length < 100) break;
   }
-  return NextResponse.json({ repos: out });
+  return NextResponse.json({ repos: out }, { headers: { "Cache-Control": "no-store" } });
 }

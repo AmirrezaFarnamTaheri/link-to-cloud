@@ -1,34 +1,77 @@
 import { NextResponse } from "next/server";
 import { getGoogleAuth } from "@/lib/google";
+import { readJsonObjectRequest } from "@/lib/http";
+import { githubOwner } from "@/lib/owners";
 import { guessName, HttpError, knownSize, mimeOf, parseHeaderLine, safeFetch } from "@/lib/net";
 import { allow } from "@/lib/ratelimit";
-import { clientIp, getSession } from "@/lib/session";
+import { clientIp, getSession, isSameOriginRequest } from "@/lib/session";
 import type { InspectResult } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
+const noStore = { "Cache-Control": "no-store" };
+
+function json(body: unknown, status = 200) {
+  return NextResponse.json(body, { status, headers: noStore });
+}
+
 /** Peek at a link (name, size, type) without downloading it. */
 export async function POST(req: Request) {
-  const s = await getSession();
-  if (!s.github && !(s.google && (await getGoogleAuth()))) {
-    return NextResponse.json({ ok: false, error: "Log in first" } satisfies InspectResult, { status: 401 });
+  if (!isSameOriginRequest(req)) return json({ ok: false, error: "Cross-origin request rejected" } satisfies InspectResult, 403);
+
+  const session = await getSession();
+  const github = session.github ? githubOwner(session.github) : null;
+  if (!github && !(session.google && (await getGoogleAuth()))) {
+    return json({ ok: false, error: "Log in first" } satisfies InspectResult, 401);
   }
   if (!allow(`inspect:${clientIp(req)}`, 120, 60_000)) {
-    return NextResponse.json({ ok: false, error: "Too many requests, slow down" } satisfies InspectResult, { status: 429 });
+    return json({ ok: false, error: "Too many requests, slow down" } satisfies InspectResult, 429);
   }
-  const b = (await req.json().catch(() => ({}))) as { url?: string; header?: string };
+
+  let body: Record<string, unknown>;
   try {
-    if (!b.url) throw new HttpError("url required");
-    const headers = parseHeaderLine(b.header);
-    let { res, finalUrl } = await safeFetch(b.url, { method: "HEAD", headers, timeoutMs: 12_000 });
-    if (!res.ok) {
-      ({ res, finalUrl } = await safeFetch(b.url, { method: "GET", headers, timeoutMs: 12_000 }));
-      await res.body?.cancel().catch(() => {});
+    body = await readJsonObjectRequest(req, 16 * 1024, "Inspection request");
+  } catch (error) {
+    return json(
+      { ok: false, error: error instanceof Error ? error.message : "Invalid request" } satisfies InspectResult,
+      error instanceof HttpError ? error.status : 400,
+    );
+  }
+  if (typeof body.url !== "string" || !body.url.trim()) {
+    return json({ ok: false, error: "url required" } satisfies InspectResult, 400);
+  }
+  const link = body.url.trim();
+  if (link.length > 8192) return json({ ok: false, error: "url is too long" } satisfies InspectResult, 400);
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(link);
+  } catch {
+    return json({ ok: false, error: "Invalid URL" } satisfies InspectResult, 400);
+  }
+  if ((parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") || parsedUrl.username || parsedUrl.password) {
+    return json({ ok: false, error: "Only http(s) URLs without embedded credentials are supported" } satisfies InspectResult, 400);
+  }
+  if (body.header !== undefined && typeof body.header !== "string") {
+    return json({ ok: false, error: "header must be a string" } satisfies InspectResult, 400);
+  }
+  if (typeof body.header === "string" && body.header.length > 4096) {
+    return json({ ok: false, error: "header is too long" } satisfies InspectResult, 400);
+  }
+
+  try {
+    const headers = parseHeaderLine(body.header as string | undefined);
+    let fetched = await safeFetch(link, { method: "HEAD", headers, timeoutMs: 12_000 });
+    if (!fetched.res.ok) {
+      await fetched.res.body?.cancel().catch(() => {});
+      fetched = await safeFetch(link, { method: "GET", headers, timeoutMs: 12_000 });
+      await fetched.res.body?.cancel().catch(() => {});
     }
+    const { res, finalUrl } = fetched;
     if (!res.ok) throw new HttpError(`Source responded with ${res.status}`, 502);
     const out: InspectResult = { ok: true, name: guessName(res, finalUrl), size: knownSize(res), mime: mimeOf(res), host: finalUrl.hostname };
-    return NextResponse.json(out);
-  } catch (e) {
-    return NextResponse.json({ ok: false, error: e instanceof Error ? e.message : "Could not inspect link" } satisfies InspectResult);
+    return json(out);
+  } catch (error) {
+    const status = error instanceof HttpError ? error.status : 502;
+    return json({ ok: false, error: error instanceof Error ? error.message : "Could not inspect link" } satisfies InspectResult, status);
   }
 }

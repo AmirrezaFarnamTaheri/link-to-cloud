@@ -11,6 +11,7 @@ import {
   type TransferEvent,
   type TransferRequest,
 } from "@/lib/types";
+import { MAX_SOURCE_LINKS, MAX_SOURCE_TEXT_CHARS, parseSourceLinks, removeSourceLink } from "@/lib/source-links";
 import { Accounts } from "./accounts";
 import { defaultDest, Destination, REPO_NAME_RE, type Dest } from "./destination";
 import { History } from "./history";
@@ -49,18 +50,7 @@ type Run = {
   error?: string;
 };
 
-const MAX_LINKS = 25;
 const PREFS_KEY = "relay.prefs.v2";
-
-function parseUrls(text: string): { urls: string[]; ignored: number } {
-  const seen = new Set<string>();
-  let ignored = 0;
-  for (const tok of text.split(/\s+/).filter(Boolean)) {
-    if (/^https?:\/\/\S+$/i.test(tok)) seen.add(tok);
-    else ignored++;
-  }
-  return { urls: [...seen].slice(0, MAX_LINKS), ignored };
-}
 
 async function streamTransfer(payload: TransferRequest, signal: AbortSignal, onEvent: (e: TransferEvent) => void) {
   const r = await fetch("/api/transfer", {
@@ -116,7 +106,7 @@ export function RelayApp() {
   const requested = useRef(new Set<string>());
   const prefsLoaded = useRef(false);
 
-  const { urls, ignored } = useMemo(() => parseUrls(text), [text]);
+  const { urls, ignored, omitted } = useMemo(() => parseSourceLinks(text), [text]);
   const anyLogin = !!(s?.github || s?.google);
 
   /* ---- session ---- */
@@ -147,8 +137,14 @@ export function RelayApp() {
     const err = new URLSearchParams(window.location.search).get("error");
     if (err) {
       const map: Record<string, string> = {
+        github_state: "GitHub sign-in could not be verified. Please try again.",
+        github_token: "GitHub could not complete sign-in. Please try again.",
+        github_profile: "GitHub account details could not be verified.",
         google_denied: "Google sign-in was cancelled.",
+        google_state: "Google sign-in could not be verified. Please try again.",
         google_scope: "Google Drive permission was not granted — please allow file access.",
+        google_token: "Google could not complete sign-in. Please try again.",
+        google_profile: "Google account details could not be verified.",
       };
       setNotice(map[err] ?? `Sign-in problem: ${err.replace(/_/g, " ")}.`);
       window.history.replaceState(null, "", "/");
@@ -165,7 +161,11 @@ export function RelayApp() {
   useEffect(() => {
     if (!prefsLoaded.current) return;
     const { target, repo, branch, path, ifExists, folderId, isPrivate } = dest;
-    localStorage.setItem(PREFS_KEY, JSON.stringify({ target, repo, branch, path, ifExists, folderId, isPrivate }));
+    try {
+      localStorage.setItem(PREFS_KEY, JSON.stringify({ target, repo, branch, path, ifExists, folderId, isPrivate }));
+    } catch {
+      // Preference persistence is optional (for example, in private browsing modes).
+    }
   }, [dest]);
 
   /* ---- link inspection (debounced, 3 at a time) ---- */
@@ -280,7 +280,15 @@ export function RelayApp() {
         await streamTransfer(payload, ac.signal, (ev) => {
           if (ev.type === "start") patch(u, { name: ev.name, total: ev.size });
           else if (ev.type === "phase") patch(u, { phase: ev.phase, kind: undefined });
-          else if (ev.type === "progress") {
+          else if (ev.type === "destination-created") {
+            if (ev.target === "github" && dest.target === "github" && dest.repoMode === "new" && !repoOverride) {
+              repoOverride = ev.repo;
+              createdRepo = true;
+            } else if (ev.target === "drive" && dest.target === "drive" && dest.folderMode === "new" && !folderOverride) {
+              folderOverride = ev.folderId;
+              createdFolder = true;
+            }
+          } else if (ev.type === "progress") {
             const now = performance.now();
             if (!t0) t0 = now;
             const secs = Math.max(0.25, (now - t0) / 1000);
@@ -289,7 +297,7 @@ export function RelayApp() {
             finished = true;
             const { type: _t, ...result } = ev;
             void _t;
-            patch(u, { status: "done", result, bytes: result.bytes });
+            patch(u, { status: "done", result, bytes: result.bytes ?? 0 });
             if (result.repo && dest.repoMode === "new" && !repoOverride) {
               repoOverride = result.repo;
               createdRepo = true;
@@ -331,7 +339,7 @@ export function RelayApp() {
   }
 
   function removeUrl(u: string) {
-    setText(urls.filter((x) => x !== u).join("\n"));
+    setText((current) => removeSourceLink(current, u));
     setRuns((p) => {
       const { [u]: _drop, ...rest } = p;
       void _drop;
@@ -364,10 +372,11 @@ export function RelayApp() {
             <textarea
               className={cx(field, "resize-y font-mono text-[13px] leading-relaxed")}
               rows={Math.min(8, Math.max(3, text.split("\n").length + 1))}
-              placeholder={"https://example.com/archive.zip\nPaste one link per line — up to 25 at once"}
+              placeholder={`https://example.com/archive.zip\nPaste one link per line — up to ${MAX_SOURCE_LINKS} at once`}
               value={text}
+              maxLength={MAX_SOURCE_TEXT_CHARS}
               disabled={running}
-              onChange={(e) => setText(e.target.value)}
+              onChange={(e) => setText(e.target.value.slice(0, MAX_SOURCE_TEXT_CHARS))}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
                   e.preventDefault();
@@ -381,6 +390,11 @@ export function RelayApp() {
               <span>
                 Dropbox, GitHub “blob” and Drive share links are converted to direct downloads automatically.
                 {ignored > 0 && <span className="ml-1 text-amber-400">{ignored} non-URL item{ignored > 1 ? "s" : ""} ignored.</span>}
+                {omitted > 0 && (
+                  <span className="ml-1 text-amber-300" role="status">
+                    {omitted} additional link{omitted > 1 ? "s were" : " was"} not included; paste them in a separate batch.
+                  </span>
+                )}
               </span>
               <kbd className="hidden rounded border border-white/10 px-1.5 py-0.5 sm:inline">Ctrl/⌘ + Enter</kbd>
             </div>
@@ -437,7 +451,7 @@ export function RelayApp() {
 
                           {r?.status === "running" && (
                             <div className="mt-2.5 space-y-1.5">
-                              <ProgressBar value={frac} indeterminate={!r.kind || !r.total} />
+                              <ProgressBar value={frac} indeterminate={!r.kind || !r.total} ariaLabel={`Transfer progress for ${name}`} />
                               <div className="flex flex-wrap justify-between gap-x-3 text-[11px] text-slate-400">
                                 <span>
                                   {r.kind === "download"
@@ -463,27 +477,31 @@ export function RelayApp() {
                           {r?.status === "done" && r.result && (
                             <div className="mt-2 space-y-1.5">
                               <div className="text-xs text-emerald-300">
-                                {r.result.skipped ? "Already exists — skipped" : "Transferred"} · {formatBytes(r.result.bytes)} in {formatDuration(r.result.durationMs)}
+                                {r.result.skipped
+                                  ? `Already exists — skipped${r.result.bytes == null ? " · source size unknown" : ` · source ${formatBytes(r.result.bytes)}`}`
+                                  : `Transferred · ${formatBytes(r.result.bytes)}`} in {formatDuration(r.result.durationMs)}
                               </div>
                               <div className="truncate text-xs text-slate-400" title={r.result.location}>
                                 {r.result.location}
                               </div>
                               <div className="flex flex-wrap items-center gap-2">
-                                <a href={r.result.url} target="_blank" rel="noreferrer" className={btnGhost}>
+                                <a href={r.result.url} target="_blank" rel="noreferrer" className={btnGhost} aria-label={`Open ${r.result.name} in ${targetName}`}>
                                   <IconExternal className="size-3.5" /> Open
                                 </a>
                                 <button className={btnGhost} onClick={() => copy(r.result!.url)}>
                                   <IconCopy className="size-3.5" /> {copied === r.result.url ? "Copied" : "Copy link"}
                                 </button>
-                                <button className={cx(btnGhost, "font-mono")} onClick={() => copy(r.result!.sha256)} title="SHA-256 checksum — click to copy">
-                                  <IconCopy className="size-3.5" /> {copied === r.result.sha256 ? "Copied" : `sha256 ${r.result.sha256.slice(0, 8)}…`}
-                                </button>
+                                {r.result.sha256 && (
+                                  <button className={cx(btnGhost, "font-mono")} onClick={() => copy(r.result!.sha256!)} title="SHA-256 checksum — click to copy">
+                                    <IconCopy className="size-3.5" /> {copied === r.result.sha256 ? "Copied" : `sha256 ${r.result.sha256.slice(0, 8)}…`}
+                                  </button>
+                                )}
                               </div>
                             </div>
                           )}
                         </div>
                         {!running && (
-                          <button className="rounded-md p-1 text-slate-500 transition hover:bg-white/10 hover:text-white" onClick={() => removeUrl(u)} aria-label="Remove link">
+                          <button className="rounded-md p-1 text-slate-500 transition hover:bg-white/10 hover:text-white focus-visible:outline focus-visible:outline-2 focus-visible:outline-indigo-300" onClick={() => removeUrl(u)} aria-label={`Remove ${name}`}>
                             <IconX className="size-4" />
                           </button>
                         )}
@@ -502,13 +520,15 @@ export function RelayApp() {
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
                 <div>
                   <span className={label}>Rename file {urls.length > 1 && "(single link only)"}</span>
-                  <input className={cx(field, "mt-1.5")} placeholder="Auto-detected" value={filename} disabled={urls.length > 1 || running} onChange={(e) => setFilename(e.target.value)} />
+                  <input className={cx(field, "mt-1.5")} placeholder="Auto-detected" maxLength={200} value={filename} disabled={urls.length > 1 || running} onChange={(e) => setFilename(e.target.value)} aria-label="Rename downloaded file" />
                 </div>
                 <div>
                   <span className={label}>Request header</span>
                   <input
                     className={cx(field, "mt-1.5 font-mono text-[13px]")}
                     placeholder="Authorization: Bearer …"
+                    maxLength={4096}
+                    aria-label="HTTP header to send to the source host"
                     value={header}
                     disabled={running}
                     onChange={(e) => setHeader(e.target.value)}
@@ -573,7 +593,7 @@ export function RelayApp() {
             </h3>
             <p>The browser sends the link and options, then receives progress updates; file bytes stay on the server side and are not downloaded by the browser.</p>
             <p>If Relay runs on localhost, your computer is the server and its internet connection carries both the source download and destination upload. When hosted remotely, your device carries only the small control/progress traffic; the host’s network and bandwidth limits apply.</p>
-            <p>Drive uses 8 MiB resumable chunks without writing files to disk. GitHub’s Contents API requires a base64 payload and buffers files in server memory. Each completed transfer includes a SHA-256 checksum.</p>
+            <p>Drive uses 8 MiB resumable chunks without writing files to disk. GitHub’s Contents API requires a base64 payload and buffers files in server memory. Uploaded files include a SHA-256 checksum; a GitHub file skipped as already existing is not downloaded or rehashed.</p>
           </div>
         </div>
       </div>

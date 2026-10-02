@@ -13,11 +13,16 @@ export class HttpError extends Error {
 
 function isPrivateIPv4(ip: string): boolean {
   if (!net.isIPv4(ip)) return true;
-  const [a, b] = ip.split(".").map(Number);
+  const [a, b, c] = ip.split(".").map(Number);
   return (
-    a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) ||
-    (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) || a >= 224
+    a === 0 || a === 10 || a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && (b === 168 || (b === 0 && (c === 0 || c === 2)) || (b === 88 && c === 99))) ||
+    (a === 198 && ((b === 18 || b === 19) || (b === 51 && c === 100))) ||
+    (a === 203 && b === 0 && c === 113) ||
+    a >= 224
   );
 }
 
@@ -53,8 +58,14 @@ function isPrivateIp(ip: string): boolean {
   // This also blocks loopback, link-local, unique-local, multicast, and mapped IPv4 forms.
   if ((groups[0] & 0xe000) !== 0x2000) return true;
 
-  // Documentation, Teredo, and 6to4 ranges must not be used as SSRF tunnels.
-  if (groups[0] === 0x2001 && (groups[1] === 0x0db8 || groups[1] === 0x0000)) return true;
+  // Conservatively exclude IANA special-purpose, documentation, and IPv6 transition space from user-controlled sources.
+  if (groups[0] === 0x2001 && (groups[1] & 0xfe00) === 0) return true; // 2001::/23 IETF assignments, including Teredo
+  if (groups[0] === 0x2001 && groups[1] === 0x0db8) return true; // documentation
+  if (groups[0] === 0x2001 && groups[1] === 0x0002 && groups[2] === 0x0000) return true; // 2001:2::/48 benchmarking
+  if (groups[0] === 0x2001 && groups[1] === 0x0010 && (groups[2] & 0xfff0) === 0) return true; // deprecated ORCHID
+  if (groups[0] === 0x2001 && groups[1] === 0x0020 && (groups[2] & 0xfff0) === 0) return true; // ORCHIDv2
+  if (groups[0] === 0x5f00) return true; // 5f00::/16 Segment Routing SIDs
+  if (groups[0] === 0x3fff && (groups[1] & 0xf000) === 0) return true; // 3fff::/20 documentation
   if (groups[0] === 0x2002) return true;
   return false;
 }
@@ -69,7 +80,7 @@ async function resolvePublicAddresses(u: URL): Promise<ResolvedAddress[]> {
     : await dns.lookup(host, { all: true, verbatim: true }).catch(() => []);
   if (!addrs.length) throw new HttpError("Could not resolve host");
   if (addrs.some((address) => isPrivateIp(address.address))) {
-    throw new HttpError("Private/internal addresses are not allowed");
+    throw new HttpError("Private, non-public, or special-use addresses are not allowed");
   }
   return addrs;
 }
@@ -140,7 +151,12 @@ function pinnedDispatcher(expectedHostname: string, addresses: ResolvedAddress[]
   });
 }
 
-function responseWithCleanup(res: Response, cleanup: () => Promise<void>): Response {
+function responseWithCleanup(
+  res: Response,
+  cleanup: () => Promise<void>,
+  onFailure: (error: unknown) => void,
+  idleTimeoutMs: number,
+): Response {
   if (!res.body) return res;
   const reader = res.body.getReader();
   let closePromise: Promise<void> | undefined;
@@ -150,32 +166,43 @@ function responseWithCleanup(res: Response, cleanup: () => Promise<void>): Respo
   };
   const body = new ReadableStream<Uint8Array>({
     async pull(controller) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const { done, value } = await reader.read();
-        if (done) {
+        const result = await Promise.race([
+          reader.read(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new HttpError("The source stopped sending data", 502)), idleTimeoutMs);
+          }),
+        ]);
+        if (result.done) {
           void close();
           controller.close();
         } else {
-          controller.enqueue(value);
+          controller.enqueue(result.value);
         }
       } catch (error) {
+        onFailure(error);
+        await reader.cancel(error).catch(() => {});
         void close();
         controller.error(error);
+      } finally {
+        if (timer) clearTimeout(timer);
       }
     },
     async cancel(reason) {
+      onFailure(reason);
       try {
         await reader.cancel(reason);
       } finally {
         await close();
       }
     },
-  });
+  }, { highWaterMark: 0 });
   return new Response(body, { status: res.status, statusText: res.statusText, headers: res.headers });
 }
 
 /**
- * Fetch with manually checked and pinned public addresses, SSRF-checked redirects, and a header timeout.
+ * Fetch with manually checked and pinned public addresses, SSRF-checked redirects, header and body-idle timeouts.
  * Custom headers are only sent to the original origin.
  */
 export async function safeFetch(
@@ -185,6 +212,7 @@ export async function safeFetch(
     method?: "GET" | "HEAD";
     signal?: AbortSignal;
     timeoutMs?: number;
+    bodyIdleTimeoutMs?: number;
     fetcher?: typeof fetch;
   } = {},
 ): Promise<{ res: Response; finalUrl: URL }> {
@@ -236,7 +264,16 @@ export async function safeFetch(
       await dispatcher.close().catch(() => {});
       return { res, finalUrl: u };
     }
-    return { res: responseWithCleanup(res, () => dispatcher.close()), finalUrl: u };
+    const bodyIdleTimeoutMs = opts.bodyIdleTimeoutMs ?? 120_000;
+    if (!Number.isSafeInteger(bodyIdleTimeoutMs) || bodyIdleTimeoutMs < 1) {
+      await res.body.cancel().catch(() => {});
+      await dispatcher.close().catch(() => {});
+      throw new Error("bodyIdleTimeoutMs must be a positive safe integer");
+    }
+    return {
+      res: responseWithCleanup(res, () => dispatcher.close(), (error) => headerTimeout.abort(error), bodyIdleTimeoutMs),
+      finalUrl: u,
+    };
   }
   throw new HttpError("Too many redirects", 502);
 }
